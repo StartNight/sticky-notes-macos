@@ -55,7 +55,7 @@ struct StickyNotesApp: App {
     }()
 
     var body: some Scene {
-        WindowGroup("Sticky Notes") {
+        WindowGroup(String(localized: "Sticky Notes")) {
             NotesListView()
                 .environment(windowManager)
                 .environment(activeWindowTracker)
@@ -65,43 +65,46 @@ struct StickyNotesApp: App {
         .defaultSize(width: 320, height: 500)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("New Note") {
+                Button(String(localized: "New Note")) {
                     let context = sharedContainer.mainContext
                     let color = NoteColor.allCases.randomElement() ?? .yellow
                     let note = StickyNote(color: color)
                     context.insert(note)
                     try? context.save()
                     openWindow(value: note.id)
+                    if AuthManager.shared.isAuthenticated {
+                        SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: context)
+                    }
                 }
                 .keyboardShortcut("n", modifiers: .command)
             }
 
-            CommandMenu("Format") {
-                Button("Bold") {
+            CommandMenu(String(localized: "Format")) {
+                Button(String(localized: "Bold")) {
                     NotificationCenter.default.post(name: .formatBold, object: nil)
                 }
                 .keyboardShortcut("b", modifiers: .command)
 
-                Button("Italic") {
+                Button(String(localized: "Italic")) {
                     NotificationCenter.default.post(name: .formatItalic, object: nil)
                 }
                 .keyboardShortcut("i", modifiers: .command)
 
-                Button("Underline") {
+                Button(String(localized: "Underline")) {
                     NotificationCenter.default.post(name: .formatUnderline, object: nil)
                 }
                 .keyboardShortcut("u", modifiers: .command)
             }
 
-            CommandMenu("Sync") {
-                Button("Sync with Microsoft Sticky Notes") {
+            CommandMenu(String(localized: "Sync")) {
+                Button(String(localized: "Sync with Microsoft Sticky Notes")) {
                     NotificationCenter.default.post(name: .requestModelContextSync, object: nil)
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
             }
         }
 
-        WindowGroup("Note", for: UUID.self) { $noteID in
+        WindowGroup(String(localized: "Note"), for: UUID.self) { $noteID in
             if let noteID {
                 NoteWindowView(noteID: noteID)
                     .environment(windowManager)

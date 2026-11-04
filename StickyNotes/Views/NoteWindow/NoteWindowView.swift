@@ -83,15 +83,15 @@ struct NoteWindowView: View {
                     )
                 )
             } else {
-                Text("Note not found")
+                Text(String(localized: "Note not found"))
                     .frame(width: 300, height: 200)
             }
         }
-        .alert("Delete Note?", isPresented: $showDeleteConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Delete", role: .destructive) { deleteNote() }
+        .alert(String(localized: "Delete Note?"), isPresented: $showDeleteConfirmation) {
+            Button(String(localized: "Cancel"), role: .cancel) {}
+            Button(String(localized: "Delete"), role: .destructive) { deleteNote() }
         } message: {
-            Text("This note will be permanently deleted.")
+            Text(String(localized: "This note will be permanently deleted."))
         }
         .onAppear { loadNote() }
     }
@@ -209,6 +209,9 @@ struct NoteWindowView: View {
         modelContext.insert(newNote)
         try? modelContext.save()
         openWindow(value: newNote.id)
+        if AuthManager.shared.isAuthenticated {
+            SyncEngine.shared.scheduleDebouncedPush(for: newNote.id, in: modelContext)
+        }
     }
 
     // MARK: - Delete

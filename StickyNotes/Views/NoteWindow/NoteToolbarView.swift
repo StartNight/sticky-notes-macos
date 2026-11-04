@@ -61,7 +61,7 @@ struct NoteToolbarView: View {
             Image(systemName: "waveform")
                 .font(.system(size: 11)).foregroundStyle(.blue)
                 .symbolEffect(.variableColor.iterative)
-            Text("Listening...")
+            Text(String(localized: "Listening..."))
                 .font(.system(size: 10)).foregroundStyle(.blue)
             Button { onStopDictation() } label: {
                 Image(systemName: "stop.circle.fill").font(.system(size: 14)).foregroundStyle(.blue)
@@ -73,10 +73,10 @@ struct NoteToolbarView: View {
     private var audioMenu: some View {
         Menu {
             Button { onStartDictation() } label: {
-                Label("Dictate (Speech to Text)", systemImage: "text.bubble")
+                Label(String(localized: "Dictate (Speech to Text)"), systemImage: "text.bubble")
             }
             Button { audioRecorder.startRecording() } label: {
-                Label("Record Audio Clip", systemImage: "waveform.circle")
+                Label(String(localized: "Record Audio Clip"), systemImage: "waveform.circle")
             }
         } label: {
             Image(systemName: "mic")
@@ -86,14 +86,14 @@ struct NoteToolbarView: View {
         }
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
-        .accessibilityLabel("Audio Input")
-        .help("Audio Input")
+        .accessibilityLabel(String(localized: "Audio Input"))
+        .help(String(localized: "Audio Input"))
     }
 
     private var noteMenu: some View {
         Menu {
             Button { onCreateNote() } label: {
-                Label("New Note", systemImage: "plus")
+                Label(String(localized: "New Note"), systemImage: "plus")
             }
             Divider()
             Section {
@@ -115,7 +115,7 @@ struct NoteToolbarView: View {
             }
             Divider()
             Button(role: .destructive) { onDelete() } label: {
-                Label("Delete Note", systemImage: "trash")
+                Label(String(localized: "Delete Note"), systemImage: "trash")
             }
         } label: {
             Image(systemName: "ellipsis")

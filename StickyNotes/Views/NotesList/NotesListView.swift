@@ -54,20 +54,20 @@ struct NotesListView: View {
                 await syncEngine.syncAll(modelContext: modelContext)
             }
         }
-        .alert("Delete Note?", isPresented: $showDeleteConfirmation) {
-            Button("Cancel", role: .cancel) { noteToDelete = nil }
-            Button("Delete", role: .destructive) {
+        .alert(String(localized: "Delete Note?"), isPresented: $showDeleteConfirmation) {
+            Button(String(localized: "Cancel"), role: .cancel) { noteToDelete = nil }
+            Button(String(localized: "Delete"), role: .destructive) {
                 if let note = noteToDelete { deleteNote(note) }
                 noteToDelete = nil
             }
         } message: {
-            Text("This note will be permanently deleted.")
+            Text(String(localized: "This note will be permanently deleted."))
         }
     }
 
     private var header: some View {
         HStack {
-            Text("Sticky Notes")
+            Text(String(localized: "Sticky Notes"))
                 .font(.system(size: 18, weight: .bold))
 
             Spacer()
@@ -82,7 +82,7 @@ struct NotesListView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .help(isCollapsed ? "Expanded View" : "Compact View")
+            .help(isCollapsed ? String(localized: "Expanded View") : String(localized: "Compact View"))
 
             Button { createNote() } label: {
                 Image(systemName: "plus")
@@ -91,7 +91,7 @@ struct NotesListView: View {
             }
             .buttonStyle(.plain)
             .keyboardShortcut("n", modifiers: .command)
-            .help("New Note (⌘N)")
+            .help(String(localized: "New Note (⌘N)"))
         }
         .padding(.horizontal, 16)
         .padding(.top, 16)
@@ -133,7 +133,7 @@ struct NotesListView: View {
             .frame(width: 20, height: 20)
         }
         .buttonStyle(.plain)
-        .help("Microsoft Cloud Sync")
+        .help(String(localized: "Microsoft Cloud Sync"))
         .popover(isPresented: $showSyncPopover, arrowEdge: .bottom) {
             syncPopoverContent
         }
@@ -145,7 +145,7 @@ struct NotesListView: View {
                 Image(systemName: "globe.badge.chevron.backward")
                     .font(.system(size: 16))
                     .foregroundStyle(.blue)
-                Text("Microsoft Sticky Notes")
+                Text(String(localized: "Microsoft Sticky Notes"))
                     .font(.system(size: 14, weight: .semibold))
             }
 
@@ -174,7 +174,7 @@ struct NotesListView: View {
                     .padding(.top, 2)
 
                     if let lastSync = syncEngine.lastSyncDate {
-                        Text("Last synced: \(lastSync.noteListFormatted)")
+                        Text(String(localized: "Last synced: \(lastSync.noteListFormatted)"))
                             .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
                     }
@@ -183,7 +183,7 @@ struct NotesListView: View {
                 Divider()
 
                 HStack {
-                    Button("Sync Now") {
+                    Button(String(localized: "Sync Now")) {
                         Task {
                             await syncEngine.syncAll(modelContext: modelContext)
                         }
@@ -192,13 +192,13 @@ struct NotesListView: View {
 
                     Spacer()
 
-                    Button("Sign Out", role: .destructive) {
+                    Button(String(localized: "Sign Out"), role: .destructive) {
                         authManager.signOut()
                     }
                 }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Connect your Microsoft account to sync sticky notes across Windows, Outlook, and macOS.")
+                    Text(String(localized: "Connect your Microsoft account to sync sticky notes across Windows, Outlook, and macOS."))
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -224,7 +224,7 @@ struct NotesListView: View {
                             } else {
                                 Image(systemName: "person.badge.key")
                             }
-                            Text(authManager.isAuthenticating ? "Signing in..." : "Sign in with Microsoft")
+                            Text(authManager.isAuthenticating ? String(localized: "Signing in...") : String(localized: "Sign in with Microsoft"))
                         }
                         .frame(maxWidth: .infinity)
                     }
@@ -243,11 +243,11 @@ struct NotesListView: View {
             Image(systemName: "note.text")
                 .font(.system(size: 40))
                 .foregroundStyle(.tertiary)
-            Text(searchText.isEmpty ? "No notes yet" : "No matching notes")
+            Text(searchText.isEmpty ? String(localized: "No notes yet") : String(localized: "No matching notes"))
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
             if searchText.isEmpty {
-                Text("Click + to create a new note")
+                Text(String(localized: "Click + to create a new note"))
                     .font(.system(size: 12))
                     .foregroundStyle(.tertiary)
             }
@@ -279,6 +279,9 @@ struct NotesListView: View {
         modelContext.insert(note)
         try? modelContext.save()
         openNote(note)
+        if authManager.isAuthenticated {
+            syncEngine.scheduleDebouncedPush(for: note.id, in: modelContext)
+        }
     }
 
     private func openNote(_ note: StickyNote) {

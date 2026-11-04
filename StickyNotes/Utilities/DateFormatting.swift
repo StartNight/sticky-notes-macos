@@ -14,7 +14,7 @@ extension Date {
             formatter.dateFormat = "h:mm a"
             return formatter.string(from: self)
         } else if calendar.isDateInYesterday(self) {
-            return "Yesterday"
+            return String(localized: "Yesterday")
         } else if let daysAgo = calendar.dateComponents([.day], from: self, to: Date()).day, daysAgo < 7 {
             let formatter = DateFormatter()
             formatter.dateFormat = "EEEE"

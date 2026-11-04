@@ -8,9 +8,9 @@ enum SyncStatus: String, Codable, CaseIterable {
 
     var displayName: String {
         switch self {
-        case .synced: return "Synced"
-        case .pendingUpload: return "Pending Upload"
-        case .error: return "Sync Error"
+        case .synced: return String(localized: "Synced")
+        case .pendingUpload: return String(localized: "Pending Upload")
+        case .error: return String(localized: "Sync Error")
         }
     }
 }
@@ -80,7 +80,7 @@ final class StickyNote {
     var title: String {
         let firstLine = redactedText.components(separatedBy: .newlines).first ?? ""
         let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
-        return trimmed.isEmpty ? "New Note" : String(trimmed.prefix(100))
+        return trimmed.isEmpty ? String(localized: "New Note") : String(trimmed.prefix(100))
     }
 
     var preview: String {

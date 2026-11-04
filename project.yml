@@ -5,6 +5,10 @@ options:
     macOS: "14.0"
   xcodeVersion: "15.0"
   minimumXcodeGenVersion: "2.35"
+  developmentLanguage: "en"
+  knownRegions:
+    - en
+    - zh-Hans
 
 targets:
   StickyNotes:

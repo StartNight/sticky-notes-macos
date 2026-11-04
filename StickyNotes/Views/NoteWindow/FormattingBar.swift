@@ -11,23 +11,23 @@ struct FormattingBar: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            formatButton(icon: "bold", label: "Bold", tooltip: "Bold (⌘B)", action: onBold)
-            formatButton(icon: "italic", label: "Italic", tooltip: "Italic (⌘I)", action: onItalic)
-            formatButton(icon: "underline", label: "Underline", tooltip: "Underline (⌘U)", action: onUnderline)
-            formatButton(icon: "strikethrough", label: "Strikethrough", tooltip: "Strikethrough", action: onStrikethrough)
+            formatButton(icon: "bold", label: String(localized: "Bold"), tooltip: String(localized: "Bold (⌘B)"), action: onBold)
+            formatButton(icon: "italic", label: String(localized: "Italic"), tooltip: String(localized: "Italic (⌘I)"), action: onItalic)
+            formatButton(icon: "underline", label: String(localized: "Underline"), tooltip: String(localized: "Underline (⌘U)"), action: onUnderline)
+            formatButton(icon: "strikethrough", label: String(localized: "Strikethrough"), tooltip: String(localized: "Strikethrough (⌘⇧X)"), action: onStrikethrough)
 
             Divider()
                 .frame(height: 16)
                 .padding(.horizontal, 3)
 
-            formatButton(icon: "list.bullet", label: "Bullet List", tooltip: "Bullet List", action: onBulletList)
-            formatButton(icon: "checkmark.square", label: "Todo List", tooltip: "Todo List", action: onTodoList)
+            formatButton(icon: "list.bullet", label: String(localized: "Bullet List"), tooltip: String(localized: "Bullet List (⌘⇧L)"), action: onBulletList)
+            formatButton(icon: "checkmark.square", label: String(localized: "Todo List"), tooltip: String(localized: "Todo List"), action: onTodoList)
 
             Divider()
                 .frame(height: 16)
                 .padding(.horizontal, 3)
 
-            formatButton(icon: "eye.slash", label: "Hide Text", tooltip: "Hide/Reveal Text", action: onHiddenText)
+            formatButton(icon: "eye.slash", label: String(localized: "Hide Text"), tooltip: String(localized: "Hide/Reveal Text"), action: onHiddenText)
         }
     }
 

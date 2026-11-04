@@ -9,7 +9,7 @@ struct SearchBar: View {
                 .foregroundStyle(.secondary)
                 .font(.system(size: 13))
 
-            TextField("Search", text: $text)
+            TextField(String(localized: "Search"), text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
 

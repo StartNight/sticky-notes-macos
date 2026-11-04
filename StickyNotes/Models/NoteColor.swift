@@ -22,7 +22,17 @@ enum NoteColor: String, CaseIterable, Codable {
     var toolbar: Color { Color(hex: colorSet.toolbarLight) }
     var darkToolbar: Color { Color(hex: colorSet.toolbarDark) }
 
-    var displayName: String { rawValue.capitalized }
+    var displayName: String {
+        switch self {
+        case .yellow: return String(localized: "Yellow")
+        case .green: return String(localized: "Green")
+        case .blue: return String(localized: "Blue")
+        case .purple: return String(localized: "Purple")
+        case .pink: return String(localized: "Pink")
+        case .orange: return String(localized: "Orange")
+        case .gray: return String(localized: "Gray")
+        }
+    }
 
     func backgroundColor(for colorScheme: ColorScheme) -> Color {
         colorScheme == .dark ? darkBackground : background

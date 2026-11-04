@@ -17,12 +17,12 @@ struct SettingsView: View {
         TabView {
             generalTab
                 .tabItem {
-                    Label("General", systemImage: "gearshape")
+                    Label(String(localized: "General"), systemImage: "gearshape")
                 }
 
             microsoftAccountTab
                 .tabItem {
-                    Label("Microsoft Account", systemImage: "arrow.triangle.2.circlepath")
+                    Label(String(localized: "Microsoft Account"), systemImage: "arrow.triangle.2.circlepath")
                 }
         }
         .frame(width: 450, height: 340)
@@ -32,7 +32,7 @@ struct SettingsView: View {
 
     private var generalTab: some View {
         Form {
-            Picker("Default note color", selection: $defaultColor) {
+            Picker(String(localized: "Default note color"), selection: $defaultColor) {
                 ForEach(NoteColor.allCases, id: \.self) { color in
                     HStack {
                         Circle()
@@ -47,9 +47,9 @@ struct SettingsView: View {
                 }
             }
 
-            Toggle("Confirm before deleting a note", isOn: $confirmBeforeDelete)
-            Toggle("Follow active app window", isOn: $followActiveApp)
-                .help("Automatically reposition notes below the active app window")
+            Toggle(String(localized: "Confirm before deleting a note"), isOn: $confirmBeforeDelete)
+            Toggle(String(localized: "Follow active app window"), isOn: $followActiveApp)
+                .help(String(localized: "Automatically reposition notes below the active app window"))
         }
         .formStyle(.grouped)
         .padding(8)
@@ -60,14 +60,14 @@ struct SettingsView: View {
     private var microsoftAccountTab: some View {
         Form {
             if authManager.isAuthenticated {
-                Section("Signed In Account") {
+                Section(String(localized: "Signed In Account")) {
                     HStack(spacing: 12) {
                         Image(systemName: "person.crop.circle.fill")
                             .font(.system(size: 32))
                             .foregroundStyle(.blue)
 
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(authManager.userName ?? "Microsoft Account")
+                            Text(authManager.userName ?? String(localized: "Microsoft Account"))
                                 .font(.system(size: 14, weight: .semibold))
                             if let email = authManager.userEmail {
                                 Text(email)
@@ -78,7 +78,7 @@ struct SettingsView: View {
 
                         Spacer()
 
-                        Button("Sign Out") {
+                        Button(String(localized: "Sign Out")) {
                             authManager.signOut()
                             syncEngine.state = .offline
                         }
@@ -86,7 +86,7 @@ struct SettingsView: View {
                     .padding(.vertical, 4)
                 }
 
-                Section("Synchronization") {
+                Section(String(localized: "Synchronization")) {
                     HStack {
                         Label {
                             Text(syncEngine.state.displayText)
@@ -101,7 +101,7 @@ struct SettingsView: View {
                             ProgressView()
                                 .controlSize(.small)
                         } else {
-                            Button("Sync Now") {
+                            Button(String(localized: "Sync Now")) {
                                 triggerManualSync()
                             }
                         }
@@ -109,7 +109,7 @@ struct SettingsView: View {
 
                     if let lastSync = syncEngine.lastSyncDate {
                         HStack {
-                            Text("Last Synced:")
+                            Text(String(localized: "Last Synced:"))
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Text(lastSync.formatted(date: .abbreviated, time: .standard))
@@ -119,9 +119,9 @@ struct SettingsView: View {
                     }
                 }
             } else {
-                Section("Account Connection") {
+                Section(String(localized: "Account Connection")) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Connect your Microsoft account to enable bidirectional synchronization with Microsoft Sticky Notes across Windows, web, and mobile.")
+                        Text(String(localized: "Connect your Microsoft account to enable bidirectional synchronization with Microsoft Sticky Notes across Windows, web, and mobile."))
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
 
@@ -142,7 +142,7 @@ struct SettingsView: View {
                                     } else {
                                         Image(systemName: "arrow.right.circle.fill")
                                     }
-                                    Text("Sign In with Microsoft")
+                                    Text(String(localized: "Sign In with Microsoft"))
                                 }
                             }
                             .buttonStyle(.borderedProminent)
@@ -155,15 +155,15 @@ struct SettingsView: View {
                 }
             }
 
-            Section("OAuth Configuration") {
+            Section(String(localized: "OAuth Configuration")) {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("Client ID:")
+                        Text(String(localized: "Client ID:"))
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                         Spacer()
                     }
-                    TextField("Client ID", text: Binding(
+                    TextField(String(localized: "Client ID"), text: Binding(
                         get: { authManager.clientId },
                         set: { authManager.clientId = $0 }
                     ))
@@ -171,12 +171,12 @@ struct SettingsView: View {
                     .font(.system(size: 11, design: .monospaced))
 
                     HStack {
-                        Text("Redirect URI:")
+                        Text(String(localized: "Redirect URI:"))
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                         Spacer()
                     }
-                    TextField("Redirect URI", text: Binding(
+                    TextField(String(localized: "Redirect URI"), text: Binding(
                         get: { authManager.redirectUri },
                         set: { authManager.redirectUri = $0 }
                     ))

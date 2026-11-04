@@ -15,10 +15,10 @@ final class SyncEngine {
 
         var displayText: String {
             switch self {
-            case .idle: return "Synced"
-            case .syncing: return "Syncing..."
-            case .error(let msg): return "Error: \(msg)"
-            case .offline: return "Offline"
+            case .idle: return String(localized: "Synced")
+            case .syncing: return String(localized: "Syncing...")
+            case .error(let msg): return String(localized: "Error: \(msg)")
+            case .offline: return String(localized: "Offline")
             }
         }
 
@@ -50,6 +50,7 @@ final class SyncEngine {
 
     private let authManager = AuthManager.shared
     private let graphEndpoint = "https://graph.microsoft.com/v1.0"
+    private let noteColorExtendedPropertyId = "Integer {0006200e-0000-0000-c000-000000000046} Id 0x8b00"
     private var debounceTasks: [UUID: Task<Void, Never>] = [:]
     private var periodicTimer: Timer?
 
@@ -98,7 +99,9 @@ final class SyncEngine {
     // MARK: - Pull Remote Notes
 
     private func pullNotes(token: String, modelContext: ModelContext) async throws {
-        let urlString = "\(graphEndpoint)/me/mailFolders/notes/messages?$top=100&$select=id,changeKey,subject,body,createdDateTime,lastModifiedDateTime,singleValueExtendedProperties"
+        let expandClause = "singleValueExtendedProperties($filter=id eq '\(noteColorExtendedPropertyId)')"
+        let encodedExpand = expandClause.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? expandClause
+        let urlString = "\(graphEndpoint)/me/mailFolders/notes/messages?$top=100&$select=id,changeKey,subject,body,createdDateTime,lastModifiedDateTime&$expand=\(encodedExpand)"
         guard let url = URL(string: urlString) else { return }
 
         var request = URLRequest(url: url)
@@ -156,7 +159,7 @@ final class SyncEngine {
             var noteColor = NoteColor.yellow
             if let props = msg["singleValueExtendedProperties"] as? [[String: Any]] {
                 for prop in props {
-                    if let propId = prop["id"] as? String, propId.contains("0x35E0"),
+                    if let propId = prop["id"] as? String, (propId.contains("0x8b00") || propId.contains("0x8B00") || propId.contains("0x35E0")),
                        let valStr = prop["value"] as? String, let code = Int(valStr) {
                         noteColor = NoteConverter.noteColor(fromOutlookCode: code)
                     }
@@ -230,13 +233,19 @@ final class SyncEngine {
 
     private func pushPendingNotes(token: String, modelContext: ModelContext) async throws {
         let pendingStatus = SyncStatus.pendingUpload.rawValue
+        let errorStatus = SyncStatus.error.rawValue
         let descriptor = FetchDescriptor<StickyNote>(
-            predicate: #Predicate<StickyNote> { $0.syncStatusRaw == pendingStatus }
+            predicate: #Predicate<StickyNote> { $0.syncStatusRaw == pendingStatus || $0.syncStatusRaw == errorStatus }
         )
         let pendingNotes = (try? modelContext.fetch(descriptor)) ?? []
 
         for note in pendingNotes {
-            try await uploadNote(note, token: token)
+            do {
+                try await uploadNote(note, token: token)
+            } catch {
+                print("Failed to push note \(note.id): \(error)")
+                note.syncStatus = .error
+            }
         }
 
         try? modelContext.save()
@@ -244,7 +253,7 @@ final class SyncEngine {
 
     // MARK: - Upload Single Note (Create or Update)
 
-    func uploadNote(_ note: StickyNote, token: String) async throws {
+    func uploadNote(_ note: StickyNote, token: String, retryAuthOnFailure: Bool = true) async throws {
         let html: String
         if let data = note.attributedContentData,
            let attrStr = try? NSKeyedUnarchiver.unarchivedObject(
@@ -257,15 +266,18 @@ final class SyncEngine {
             html = NoteConverter.plainTextToHtml(note.plainTextContent)
         }
 
+        let trimmedTitle = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let subject = trimmedTitle.isEmpty ? "New Note" : trimmedTitle
+
         let payload: [String: Any] = [
-            "subject": note.title,
+            "subject": subject,
             "body": [
                 "contentType": "html",
                 "content": html
             ],
             "singleValueExtendedProperties": [
                 [
-                    "id": "Integer 0x35E0",
+                    "id": noteColorExtendedPropertyId,
                     "value": "\(NoteConverter.outlookColorCode(for: note.noteColor))"
                 ]
             ]
@@ -283,9 +295,23 @@ final class SyncEngine {
             request.httpBody = jsonData
 
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+            guard let httpResponse = response as? HTTPURLResponse else {
                 note.syncStatus = .error
-                throw NSError(domain: "SyncEngine", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to update note"])
+                throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
+            }
+
+            if (httpResponse.statusCode == 401 || httpResponse.statusCode == 403) && retryAuthOnFailure {
+                let newToken = try await authManager.refreshTokens()
+                return try await uploadNote(note, token: newToken, retryAuthOnFailure: false)
+            }
+
+            guard (200...299).contains(httpResponse.statusCode) else {
+                note.syncStatus = .error
+                let responseBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+                print("Failed to update note (HTTP \(httpResponse.statusCode)): \(responseBody)")
+                throw NSError(domain: "SyncEngine", code: httpResponse.statusCode, userInfo: [
+                    NSLocalizedDescriptionKey: "Failed to update note (HTTP \(httpResponse.statusCode)): \(responseBody)"
+                ])
             }
 
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -304,9 +330,23 @@ final class SyncEngine {
             request.httpBody = jsonData
 
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+            guard let httpResponse = response as? HTTPURLResponse else {
                 note.syncStatus = .error
-                throw NSError(domain: "SyncEngine", code: -3, userInfo: [NSLocalizedDescriptionKey: "Failed to create note"])
+                throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
+            }
+
+            if (httpResponse.statusCode == 401 || httpResponse.statusCode == 403) && retryAuthOnFailure {
+                let newToken = try await authManager.refreshTokens()
+                return try await uploadNote(note, token: newToken, retryAuthOnFailure: false)
+            }
+
+            guard (200...299).contains(httpResponse.statusCode) else {
+                note.syncStatus = .error
+                let responseBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+                print("Failed to create note (HTTP \(httpResponse.statusCode)): \(responseBody)")
+                throw NSError(domain: "SyncEngine", code: httpResponse.statusCode, userInfo: [
+                    NSLocalizedDescriptionKey: "Failed to create note (HTTP \(httpResponse.statusCode)): \(responseBody)"
+                ])
             }
 
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

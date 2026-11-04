@@ -36,7 +36,7 @@ struct AudioClipView: View {
                     .clipShape(Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(audioRecorder.isPlaying && audioRecorder.playingIndex == index ? "Stop" : "Play")
+            .accessibilityLabel(audioRecorder.isPlaying && audioRecorder.playingIndex == index ? String(localized: "Stop") : String(localized: "Play"))
 
             RoundedRectangle(cornerRadius: 2)
                 .fill(.primary.opacity(0.15))
@@ -63,7 +63,7 @@ struct AudioClipView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Delete recording")
+            .accessibilityLabel(String(localized: "Delete recording"))
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)

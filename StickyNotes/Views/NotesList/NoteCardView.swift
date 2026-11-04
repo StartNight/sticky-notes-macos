@@ -21,19 +21,19 @@ struct NoteCardView: View {
                     Image(systemName: "exclamationmark.icloud.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(.red)
-                        .help("Sync error")
+                        .help(String(localized: "Sync error"))
                 } else if note.syncStatus == .pendingUpload {
                     Image(systemName: "arrow.triangle.2.circlepath")
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
-                        .help("Pending upload")
+                        .help(String(localized: "Pending upload"))
                 }
 
                 if !note.audioRecordings.isEmpty {
                     Image(systemName: "mic.fill")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
-                        .accessibilityLabel("Has audio recordings")
+                        .accessibilityLabel(String(localized: "Has audio recordings"))
                 }
 
                 Text(note.modifiedAt.noteListFormatted)
@@ -57,9 +57,9 @@ struct NoteCardView: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onOpen)
         .contextMenu {
-            Button("Open Note") { onOpen() }
+            Button(String(localized: "Open Note")) { onOpen() }
             Divider()
-            Menu("Color") {
+            Menu(String(localized: "Color")) {
                 ForEach(NoteColor.allCases, id: \.self) { color in
                     Button {
                         note.setColor(color)
@@ -75,7 +75,7 @@ struct NoteCardView: View {
                 }
             }
             Divider()
-            Button("Delete", role: .destructive) { onDelete() }
+            Button(String(localized: "Delete"), role: .destructive) { onDelete() }
         }
     }
 }

@@ -15,6 +15,7 @@
 		25A96F199F4E311C9E57D789 /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0452B406919C274FD81269F9 /* KeychainHelper.swift */; };
 		25F8D03BFFB6FB179A74167A /* WindowManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA4CAE13354C9E6012AA1457 /* WindowManager.swift */; };
 		2DF20E09E4B01844DBDD5D61 /* URLDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 815FBA6DADF12E5FC41F5DEF /* URLDetector.swift */; };
+		52327F5608CB3B48680DB018 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = E03440D2E98E2EB7FA1E3381 /* Localizable.xcstrings */; };
 		550F496734439B63A09B88EF /* ColorExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2297900470B900CA99A1EE23 /* ColorExtensions.swift */; };
 		5ED177517D5612505D58BCD0 /* NotesListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFA10ED573A90AB22C21C27D /* NotesListView.swift */; };
 		6294487BC7E6D4BD155FD2A7 /* ColorPickerMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88FA0193B36885EB9821C43D /* ColorPickerMenu.swift */; };
@@ -64,6 +65,7 @@
 		D7217EF20296DFC6B0BC4020 /* FormattingBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormattingBar.swift; sourceTree = "<group>"; };
 		D8826B7F98B8949FE9E61E5A /* StickyNote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickyNote.swift; sourceTree = "<group>"; };
 		DC64E0327C1C6DD99B7D8A27 /* NoteConverter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteConverter.swift; sourceTree = "<group>"; };
+		E03440D2E98E2EB7FA1E3381 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		EE586DF508DB92410B58BAD5 /* NoteWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteWindowView.swift; sourceTree = "<group>"; };
 		F95B31B727D6F6185EC084A4 /* AudioClipView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioClipView.swift; sourceTree = "<group>"; };
 		FEF7E171627D81943B9AF5E1 /* WindowAccessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowAccessor.swift; sourceTree = "<group>"; };
@@ -126,6 +128,7 @@
 			isa = PBXGroup;
 			children = (
 				330DBE45BB9D76027DFFCD95 /* Assets.xcassets */,
+				E03440D2E98E2EB7FA1E3381 /* Localizable.xcstrings */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -233,6 +236,7 @@
 			knownRegions = (
 				Base,
 				en,
+				"zh-Hans",
 			);
 			mainGroup = 4E2B9DFAFECACE9D91CA93A4;
 			minimizedProjectReferenceProxies = 1;
@@ -252,6 +256,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C2DB3D4BD76A9D3931B58DB4 /* Assets.xcassets in Resources */,
+				52327F5608CB3B48680DB018 /* Localizable.xcstrings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
