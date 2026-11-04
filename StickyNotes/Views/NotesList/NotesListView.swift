@@ -7,9 +7,12 @@ struct NotesListView: View {
     @Environment(WindowManager.self) private var windowManager
     @Environment(ActiveWindowTracker.self) private var activeWindowTracker
     @Query(sort: \StickyNote.modifiedAt, order: .reverse) private var notes: [StickyNote]
+    @State private var authManager = AuthManager.shared
+    @State private var syncEngine = SyncEngine.shared
     @State private var searchText = ""
     @State private var noteToDelete: StickyNote?
     @State private var showDeleteConfirmation = false
+    @State private var showSyncPopover = false
     @State private var isCollapsed = false
     @AppStorage("confirmBeforeDelete") private var confirmBeforeDelete = true
     @AppStorage("followActiveApp") private var followActiveApp = true
@@ -41,6 +44,16 @@ struct NotesListView: View {
         .onAppear {
             activeWindowTracker.isEnabled = followActiveApp
         }
+        .task {
+            if authManager.isAuthenticated {
+                await syncEngine.syncAll(modelContext: modelContext)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .requestModelContextSync)) { _ in
+            Task {
+                await syncEngine.syncAll(modelContext: modelContext)
+            }
+        }
         .alert("Delete Note?", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) { noteToDelete = nil }
             Button("Delete", role: .destructive) {
@@ -58,6 +71,8 @@ struct NotesListView: View {
                 .font(.system(size: 18, weight: .bold))
 
             Spacer()
+
+            cloudSyncButton
 
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) { isCollapsed.toggle() }
@@ -81,6 +96,145 @@ struct NotesListView: View {
         .padding(.horizontal, 16)
         .padding(.top, 16)
         .padding(.bottom, 4)
+    }
+
+    private var cloudSyncButton: some View {
+        Button {
+            showSyncPopover.toggle()
+        } label: {
+            Group {
+                switch syncEngine.state {
+                case .syncing:
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.blue)
+                        .rotationEffect(.degrees(360))
+                        .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: syncEngine.state)
+                case .error:
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.orange)
+                case .offline:
+                    Image(systemName: "icloud.slash")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                case .idle:
+                    if authManager.isAuthenticated {
+                        Image(systemName: "checkmark.icloud")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Image(systemName: "icloud")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.plain)
+        .help("Microsoft Cloud Sync")
+        .popover(isPresented: $showSyncPopover, arrowEdge: .bottom) {
+            syncPopoverContent
+        }
+    }
+
+    private var syncPopoverContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "globe.badge.chevron.backward")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.blue)
+                Text("Microsoft Sticky Notes")
+                    .font(.system(size: 14, weight: .semibold))
+            }
+
+            Divider()
+
+            if authManager.isAuthenticated {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let name = authManager.userName {
+                        Text(name)
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    if let email = authManager.userEmail {
+                        Text(email)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(syncEngine.state == .syncing ? .blue : (syncEngine.state == .error("") ? .orange : .green))
+                            .frame(width: 6, height: 6)
+                        Text(syncEngine.state.displayText)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 2)
+
+                    if let lastSync = syncEngine.lastSyncDate {
+                        Text("Last synced: \(lastSync.noteListFormatted)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                Divider()
+
+                HStack {
+                    Button("Sync Now") {
+                        Task {
+                            await syncEngine.syncAll(modelContext: modelContext)
+                        }
+                    }
+                    .disabled(syncEngine.state == .syncing)
+
+                    Spacer()
+
+                    Button("Sign Out", role: .destructive) {
+                        authManager.signOut()
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Connect your Microsoft account to sync sticky notes across Windows, Outlook, and macOS.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let err = authManager.lastAuthError {
+                        Text(err)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red)
+                    }
+
+                    Button {
+                        Task {
+                            try? await authManager.signIn()
+                            if authManager.isAuthenticated {
+                                await syncEngine.syncAll(modelContext: modelContext)
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            if authManager.isAuthenticating {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "person.badge.key")
+                            }
+                            Text(authManager.isAuthenticating ? "Signing in..." : "Sign in with Microsoft")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(authManager.isAuthenticating)
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 260)
     }
 
     private var emptyState: some View {
@@ -148,7 +302,11 @@ struct NotesListView: View {
 
     private func deleteNote(_ note: StickyNote) {
         windowManager.closeWindow(for: note.id)
+        let remoteId = note.remoteId
         modelContext.delete(note)
         try? modelContext.save()
+        if let remoteId {
+            syncEngine.deleteRemoteNote(remoteId: remoteId)
+        }
     }
 }

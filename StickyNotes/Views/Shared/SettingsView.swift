@@ -1,11 +1,36 @@
 import SwiftUI
+import SwiftData
 
 struct SettingsView: View {
+    @Environment(\.modelContext) private var modelContext
     @AppStorage("defaultColor") private var defaultColor: String = NoteColor.yellow.rawValue
     @AppStorage("confirmBeforeDelete") private var confirmBeforeDelete: Bool = true
     @AppStorage("followActiveApp") private var followActiveApp: Bool = true
 
+    @State private var authManager = AuthManager.shared
+    @State private var syncEngine = SyncEngine.shared
+    @State private var isSigningIn = false
+    @State private var errorMessage: String? = nil
+    @State private var isSyncing = false
+
     var body: some View {
+        TabView {
+            generalTab
+                .tabItem {
+                    Label("General", systemImage: "gearshape")
+                }
+
+            microsoftAccountTab
+                .tabItem {
+                    Label("Microsoft Account", systemImage: "arrow.triangle.2.circlepath")
+                }
+        }
+        .frame(width: 450, height: 340)
+    }
+
+    // MARK: - General Tab
+
+    private var generalTab: some View {
         Form {
             Picker("Default note color", selection: $defaultColor) {
                 ForEach(NoteColor.allCases, id: \.self) { color in
@@ -27,6 +52,164 @@ struct SettingsView: View {
                 .help("Automatically reposition notes below the active app window")
         }
         .formStyle(.grouped)
-        .frame(width: 350, height: 180)
+        .padding(8)
+    }
+
+    // MARK: - Microsoft Account Tab
+
+    private var microsoftAccountTab: some View {
+        Form {
+            if authManager.isAuthenticated {
+                Section("Signed In Account") {
+                    HStack(spacing: 12) {
+                        Image(systemName: "person.crop.circle.fill")
+                            .font(.system(size: 32))
+                            .foregroundStyle(.blue)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(authManager.userName ?? "Microsoft Account")
+                                .font(.system(size: 14, weight: .semibold))
+                            if let email = authManager.userEmail {
+                                Text(email)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Spacer()
+
+                        Button("Sign Out") {
+                            authManager.signOut()
+                            syncEngine.state = .offline
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Section("Synchronization") {
+                    HStack {
+                        Label {
+                            Text(syncEngine.state.displayText)
+                        } icon: {
+                            Image(systemName: syncEngine.state.systemImage)
+                                .foregroundStyle(syncEngine.state == .idle ? .green : .orange)
+                        }
+
+                        Spacer()
+
+                        if isSyncing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Button("Sync Now") {
+                                triggerManualSync()
+                            }
+                        }
+                    }
+
+                    if let lastSync = syncEngine.lastSyncDate {
+                        HStack {
+                            Text("Last Synced:")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(lastSync.formatted(date: .abbreviated, time: .standard))
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.system(size: 12))
+                    }
+                }
+            } else {
+                Section("Account Connection") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Connect your Microsoft account to enable bidirectional synchronization with Microsoft Sticky Notes across Windows, web, and mobile.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+
+                        if let errorMessage {
+                            Text(errorMessage)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.red)
+                        }
+
+                        HStack {
+                            Button {
+                                startSignIn()
+                            } label: {
+                                HStack {
+                                    if isSigningIn {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        Image(systemName: "arrow.right.circle.fill")
+                                    }
+                                    Text("Sign In with Microsoft")
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isSigningIn)
+
+                            Spacer()
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
+            Section("OAuth Configuration") {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Client ID:")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    TextField("Client ID", text: Binding(
+                        get: { authManager.clientId },
+                        set: { authManager.clientId = $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+
+                    HStack {
+                        Text("Redirect URI:")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    TextField("Redirect URI", text: Binding(
+                        get: { authManager.redirectUri },
+                        set: { authManager.redirectUri = $0 }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .padding(8)
+    }
+
+    private func startSignIn() {
+        isSigningIn = true
+        errorMessage = nil
+        Task {
+            do {
+                try await authManager.signIn()
+                isSigningIn = false
+                triggerManualSync()
+            } catch {
+                isSigningIn = false
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func triggerManualSync() {
+        guard !isSyncing else { return }
+        isSyncing = true
+        Task {
+            await syncEngine.syncAll(modelContext: modelContext)
+            isSyncing = false
+        }
     }
 }

@@ -92,6 +92,13 @@ struct StickyNotesApp: App {
                 }
                 .keyboardShortcut("u", modifiers: .command)
             }
+
+            CommandMenu("Sync") {
+                Button("Sync with Microsoft Sticky Notes") {
+                    NotificationCenter.default.post(name: .requestModelContextSync, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+            }
         }
 
         WindowGroup("Note", for: UUID.self) { $noteID in
@@ -107,6 +114,7 @@ struct StickyNotesApp: App {
 
         Settings {
             SettingsView()
+                .modelContainer(sharedContainer)
         }
     }
 }

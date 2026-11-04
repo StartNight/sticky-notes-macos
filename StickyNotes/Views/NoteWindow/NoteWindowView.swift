@@ -125,7 +125,9 @@ struct NoteWindowView: View {
             requiringSecureCoding: true
         )
         note.modifiedAt = Date()
+        note.syncStatus = .pendingUpload
         try? modelContext.save()
+        SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: modelContext)
     }
 
     // MARK: - Window Position
@@ -221,11 +223,15 @@ struct NoteWindowView: View {
 
     private func deleteNote() {
         guard let noteToDelete = note else { return }
+        let remoteId = noteToDelete.remoteId
         audioRecorder.stopPlayback()
         speechRecognizer.stopListening()
         self.note = nil
         modelContext.delete(noteToDelete)
         try? modelContext.save()
         windowManager.closeWindow(for: noteID)
+        if let remoteId {
+            SyncEngine.shared.deleteRemoteNote(remoteId: remoteId)
+        }
     }
 }

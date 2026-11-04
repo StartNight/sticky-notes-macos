@@ -1,6 +1,20 @@
 import AppKit
 import SwiftData
 
+enum SyncStatus: String, Codable, CaseIterable {
+    case synced
+    case pendingUpload
+    case error
+
+    var displayName: String {
+        switch self {
+        case .synced: return "Synced"
+        case .pendingUpload: return "Pending Upload"
+        case .error: return "Sync Error"
+        }
+    }
+}
+
 @Model
 final class StickyNote {
     var id: UUID
@@ -17,6 +31,17 @@ final class StickyNote {
 
     @Attribute(.externalStorage)
     var audioRecordings: [Data]
+
+    // MARK: - Cloud Sync Metadata
+    var remoteId: String?
+    var changeKey: String?
+    var syncStatusRaw: String
+    var lastSyncedAt: Date?
+
+    var syncStatus: SyncStatus {
+        get { SyncStatus(rawValue: syncStatusRaw) ?? .pendingUpload }
+        set { syncStatusRaw = newValue.rawValue }
+    }
 
     var noteColor: NoteColor {
         get { NoteColor(rawValue: colorRawValue) ?? .yellow }
@@ -66,7 +91,11 @@ final class StickyNote {
 
     init(
         color: NoteColor = .yellow,
-        content: String = ""
+        content: String = "",
+        remoteId: String? = nil,
+        changeKey: String? = nil,
+        syncStatus: SyncStatus = .pendingUpload,
+        lastSyncedAt: Date? = nil
     ) {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let width: Double = 300
@@ -88,6 +117,11 @@ final class StickyNote {
         self.modifiedAt = Date()
         self.isOpen = false
         self.audioRecordings = []
+
+        self.remoteId = remoteId
+        self.changeKey = changeKey
+        self.syncStatusRaw = syncStatus.rawValue
+        self.lastSyncedAt = lastSyncedAt
     }
 
     // MARK: - Mutations
@@ -95,16 +129,19 @@ final class StickyNote {
     func setColor(_ color: NoteColor) {
         noteColor = color
         modifiedAt = Date()
+        syncStatus = .pendingUpload
     }
 
     func addAudioRecording(_ data: Data) {
         audioRecordings.append(data)
         modifiedAt = Date()
+        syncStatus = .pendingUpload
     }
 
     func removeAudioRecording(at index: Int) {
         guard audioRecordings.indices.contains(index) else { return }
         audioRecordings.remove(at: index)
         modifiedAt = Date()
+        syncStatus = .pendingUpload
     }
 }

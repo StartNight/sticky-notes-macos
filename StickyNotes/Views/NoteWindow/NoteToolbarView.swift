@@ -100,6 +100,9 @@ struct NoteToolbarView: View {
                 ForEach(NoteColor.allCases, id: \.self) { color in
                     Button {
                         note.setColor(color)
+                        if let context = note.modelContext {
+                            SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: context)
+                        }
                     } label: {
                         Label {
                             Text(color.displayName)

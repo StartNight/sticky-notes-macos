@@ -17,6 +17,18 @@ struct NoteCardView: View {
 
                 Spacer()
 
+                if note.syncStatus == .error {
+                    Image(systemName: "exclamationmark.icloud.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.red)
+                        .help("Sync error")
+                } else if note.syncStatus == .pendingUpload {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .help("Pending upload")
+                }
+
                 if !note.audioRecordings.isEmpty {
                     Image(systemName: "mic.fill")
                         .font(.system(size: 9))
@@ -51,6 +63,9 @@ struct NoteCardView: View {
                 ForEach(NoteColor.allCases, id: \.self) { color in
                     Button {
                         note.setColor(color)
+                        if let context = note.modelContext {
+                            SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: context)
+                        }
                     } label: {
                         HStack {
                             Image(systemName: note.noteColor == color ? "checkmark.circle.fill" : "circle.fill")
