@@ -16,6 +16,9 @@ targets:
     platform: macOS
     sources:
       - StickyNotes
+    scheme:
+      testTargets:
+        - StickyNotesTests
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shenanigans.sticky-notes
@@ -34,3 +37,29 @@ targets:
         COMBINE_HIDPI_IMAGES: YES
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "Sticky Notes needs microphone access to record audio notes and dictation."
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "Sticky Notes uses speech recognition for dictation input."
+
+  # QA: unit-test bundle WITHOUT host app.
+  # Hosting would launch the real app, which opens the user's real SwiftData store and
+  # auto-syncs with the signed-in Outlook account. Instead the needed production sources are
+  # compiled directly into the test bundle, and AuthManager is replaced by a test double
+  # (Tests/Support/AuthManagerStub.swift) so no keychain / network access happens.
+  StickyNotesTests:
+    type: bundle.unit-test
+    platform: macOS
+    scheme:
+      testTargets:
+        - StickyNotesTests
+    sources:
+      - Tests
+      - StickyNotes/Models
+      - StickyNotes/Services/NoteConverter.swift
+      - StickyNotes/Services/SyncEngine.swift
+      - StickyNotes/Services/TextEditorProxy.swift
+      - StickyNotes/Utilities/ColorExtensions.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shenanigans.sticky-notes.tests
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "-"

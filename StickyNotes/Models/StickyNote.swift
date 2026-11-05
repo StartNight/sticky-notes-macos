@@ -37,6 +37,8 @@ final class StickyNote {
     var changeKey: String?
     var syncStatusRaw: String
     var lastSyncedAt: Date?
+    /// Tombstone: note was deleted locally and is waiting for a successful remote DELETE.
+    var isDeletedLocally: Bool = false
 
     var syncStatus: SyncStatus {
         get { SyncStatus(rawValue: syncStatusRaw) ?? .pendingUpload }
@@ -122,6 +124,7 @@ final class StickyNote {
         self.changeKey = changeKey
         self.syncStatusRaw = syncStatus.rawValue
         self.lastSyncedAt = lastSyncedAt
+        self.isDeletedLocally = false
     }
 
     // MARK: - Mutations

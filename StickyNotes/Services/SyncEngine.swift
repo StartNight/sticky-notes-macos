@@ -53,6 +53,8 @@ final class SyncEngine {
     private let noteColorExtendedPropertyId = "Integer {0006200e-0000-0000-c000-000000000046} Id 0x8b00"
     private var debounceTasks: [UUID: Task<Void, Never>] = [:]
     private var periodicTimer: Timer?
+    /// Remote IDs deleted locally whose DELETE has not yet succeeded (in-memory retry queue).
+    private var pendingRemoteDeletes: Set<String> = []
 
     init() {
         startPeriodicSync()
@@ -98,7 +100,7 @@ final class SyncEngine {
 
     // MARK: - Pull Remote Notes
 
-    private func pullNotes(token: String, modelContext: ModelContext) async throws {
+    private func pullNotes(token: String, modelContext: ModelContext, retryAuthOnFailure: Bool = true) async throws {
         let expandClause = "singleValueExtendedProperties($filter=id eq '\(noteColorExtendedPropertyId)')"
         let encodedExpand = expandClause.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? expandClause
         let urlString = "\(graphEndpoint)/me/mailFolders/notes/messages?$top=100&$select=id,changeKey,subject,body,createdDateTime,lastModifiedDateTime&$expand=\(encodedExpand)"
@@ -114,9 +116,11 @@ final class SyncEngine {
         }
 
         if httpResponse.statusCode == 401 {
-            // Re-attempt with refreshed token
+            guard retryAuthOnFailure else {
+                throw NSError(domain: "SyncEngine", code: 401, userInfo: [NSLocalizedDescriptionKey: "Pull failed: unauthorized"])
+            }
             let newToken = try await authManager.refreshTokens()
-            return try await pullNotes(token: newToken, modelContext: modelContext)
+            return try await pullNotes(token: newToken, modelContext: modelContext, retryAuthOnFailure: false)
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
@@ -166,7 +170,25 @@ final class SyncEngine {
                 }
             }
 
-            if let localNote = localByRemoteId[remoteId] {
+            let existingLocal = localByRemoteId[remoteId]
+            if pendingRemoteDeletes.contains(remoteId) || existingLocal?.isDeletedLocally == true {
+                // Tombstone: do not resurrect; replay DELETE and drop the local stub.
+                do {
+                    try await performRemoteDelete(remoteId: remoteId, token: token)
+                    if let existingLocal {
+                        modelContext.delete(existingLocal)
+                    }
+                } catch {
+                    print("Failed to replay delete for \(remoteId): \(error)")
+                    if let existingLocal {
+                        existingLocal.isDeletedLocally = true
+                        existingLocal.syncStatus = .error
+                    }
+                }
+                continue
+            }
+
+            if let localNote = existingLocal {
                 // Note exists locally
                 if localNote.changeKey == changeKey {
                     // No remote changes
@@ -190,6 +212,7 @@ final class SyncEngine {
                         localNote.plainTextContent = plainText
                         let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
                         localNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
+                        localNote.noteColor = noteColor
                         localNote.changeKey = changeKey
                         localNote.modifiedAt = remoteModifiedDate
                         localNote.syncStatus = .synced
@@ -203,6 +226,7 @@ final class SyncEngine {
                     localNote.plainTextContent = plainText
                     let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
                     localNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
+                    localNote.noteColor = noteColor
                     localNote.changeKey = changeKey
                     localNote.modifiedAt = remoteModifiedDate
                     localNote.syncStatus = .synced
@@ -232,6 +256,8 @@ final class SyncEngine {
     // MARK: - Push Pending Local Notes
 
     private func pushPendingNotes(token: String, modelContext: ModelContext) async throws {
+        try await pushPendingDeletes(token: token, modelContext: modelContext)
+
         let pendingStatus = SyncStatus.pendingUpload.rawValue
         let errorStatus = SyncStatus.error.rawValue
         let descriptor = FetchDescriptor<StickyNote>(
@@ -240,6 +266,7 @@ final class SyncEngine {
         let pendingNotes = (try? modelContext.fetch(descriptor)) ?? []
 
         for note in pendingNotes {
+            if note.isDeletedLocally { continue }
             do {
                 try await uploadNote(note, token: token)
             } catch {
@@ -391,19 +418,82 @@ final class SyncEngine {
     // MARK: - Delete Note Remotely
 
     func deleteRemoteNote(remoteId: String) {
+        pendingRemoteDeletes.insert(remoteId)
         Task {
-            guard authManager.isAuthenticated else { return }
+            guard authManager.isAuthenticated else {
+                self.state = .error("Delete pending until signed in")
+                return
+            }
             do {
                 let token = try await authManager.getValidAccessToken()
-                guard let url = URL(string: "\(graphEndpoint)/me/messages/\(remoteId)") else { return }
-                var request = URLRequest(url: url)
-                request.httpMethod = "DELETE"
-                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                _ = try await URLSession.shared.data(for: request)
+                try await performRemoteDelete(remoteId: remoteId, token: token)
             } catch {
                 print("Failed to delete remote note \(remoteId): \(error)")
+                self.state = .error(error.localizedDescription)
             }
         }
+    }
+
+    private func pushPendingDeletes(token: String, modelContext: ModelContext) async throws {
+        let descriptor = FetchDescriptor<StickyNote>()
+        let localNotes = (try? modelContext.fetch(descriptor)) ?? []
+
+        var ids = pendingRemoteDeletes
+        for note in localNotes where note.isDeletedLocally {
+            if let remoteId = note.remoteId {
+                ids.insert(remoteId)
+            } else {
+                modelContext.delete(note)
+            }
+        }
+
+        for remoteId in ids {
+            do {
+                try await performRemoteDelete(remoteId: remoteId, token: token)
+                for note in localNotes where note.remoteId == remoteId {
+                    if note.isDeletedLocally {
+                        modelContext.delete(note)
+                    }
+                }
+            } catch {
+                print("Failed to push pending delete \(remoteId): \(error)")
+                for note in localNotes where note.remoteId == remoteId {
+                    note.isDeletedLocally = true
+                    note.syncStatus = .error
+                }
+            }
+        }
+    }
+
+    private func performRemoteDelete(remoteId: String, token: String, retryAuthOnFailure: Bool = true) async throws {
+        guard let url = URL(string: "\(graphEndpoint)/me/messages/\(remoteId)") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
+        }
+
+        if (httpResponse.statusCode == 401 || httpResponse.statusCode == 403) && retryAuthOnFailure {
+            let newToken = try await authManager.refreshTokens()
+            return try await performRemoteDelete(remoteId: remoteId, token: newToken, retryAuthOnFailure: false)
+        }
+
+        if httpResponse.statusCode == 404 {
+            pendingRemoteDeletes.remove(remoteId)
+            return
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            let responseBody = String(data: data, encoding: .utf8) ?? "HTTP \(httpResponse.statusCode)"
+            throw NSError(domain: "SyncEngine", code: httpResponse.statusCode, userInfo: [
+                NSLocalizedDescriptionKey: "Failed to delete note (HTTP \(httpResponse.statusCode)): \(responseBody)"
+            ])
+        }
+
+        pendingRemoteDeletes.remove(remoteId)
     }
 
     // MARK: - Date Formatting Helper

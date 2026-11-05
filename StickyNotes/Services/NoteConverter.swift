@@ -32,6 +32,10 @@ struct NoteConverter {
         // Ensure text color is appropriate for current theme
         normalizeColors(in: parsed)
 
+        // AppKit's HTML importer appends a trailing newline for block-level tags
+        // such as </div>. Strip extras so repeated round-trips stay a fixed point.
+        trimTrailingHTMLNewlines(in: parsed)
+
         return parsed
     }
 
@@ -132,8 +136,11 @@ struct NoteConverter {
         case .pink: return 2
         case .yellow: return 3
         case .gray: return 4
-        case .orange: return 3 // closest to yellow in classic Outlook
-        case .purple: return 2 // closest to pink
+        // Outlook PidLidNoteColor only documents 0-4. Use 5/6 so every local
+        // color has a stable, reversible code (purple/orange would otherwise
+        // collapse to pink/yellow).
+        case .purple: return 5
+        case .orange: return 6
         }
     }
 
@@ -144,6 +151,8 @@ struct NoteConverter {
         case 2: return .pink
         case 3: return .yellow
         case 4: return .gray
+        case 5: return .purple
+        case 6: return .orange
         default: return .yellow
         }
     }
@@ -231,7 +240,7 @@ struct NoteConverter {
     }
 
     private static func unescapeHtml(_ string: String) -> String {
-        var unescaped = string
+        var unescaped = decodeNumericHtmlEntities(string)
         unescaped = unescaped.replacingOccurrences(of: "&quot;", with: "\"")
         unescaped = unescaped.replacingOccurrences(of: "&apos;", with: "'")
         unescaped = unescaped.replacingOccurrences(of: "&gt;", with: ">")
@@ -239,5 +248,50 @@ struct NoteConverter {
         unescaped = unescaped.replacingOccurrences(of: "&nbsp;", with: " ")
         unescaped = unescaped.replacingOccurrences(of: "&amp;", with: "&")
         return unescaped
+    }
+
+    /// Decode &#NNN; and &#xHH; numeric entities. NBSP (160) becomes a regular
+    /// space to match `&nbsp;` handling used by titles/previews.
+    private static func decodeNumericHtmlEntities(_ string: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "&#(x[0-9a-fA-F]+|[0-9]+);", options: .caseInsensitive) else {
+            return string
+        }
+        let nsString = string as NSString
+        let matches = regex.matches(in: string, options: [], range: NSRange(location: 0, length: nsString.length))
+        var result = string
+        for match in matches.reversed() {
+            guard match.numberOfRanges >= 2,
+                  let fullRange = Range(match.range, in: result),
+                  let codeRange = Range(match.range(at: 1), in: result) else { continue }
+            let code = String(result[codeRange])
+            let value: UInt32?
+            if code.lowercased().hasPrefix("x") {
+                value = UInt32(code.dropFirst(), radix: 16)
+            } else {
+                value = UInt32(code)
+            }
+            guard let scalarValue = value else { continue }
+            let replacement: String
+            if scalarValue == 160 {
+                replacement = " "
+            } else if let scalar = Unicode.Scalar(scalarValue) {
+                replacement = String(Character(scalar))
+            } else {
+                continue
+            }
+            result.replaceSubrange(fullRange, with: replacement)
+        }
+        return result
+    }
+
+    private static func trimTrailingHTMLNewlines(in attrStr: NSMutableAttributedString) {
+        while attrStr.length > 0 {
+            let last = (attrStr.string as NSString).substring(from: attrStr.length - 1)
+            if last == "\n" {
+                attrStr.deleteCharacters(in: NSRange(location: attrStr.length - 1, length: 1))
+            } else {
+                break
+            }
+        }
     }
 }

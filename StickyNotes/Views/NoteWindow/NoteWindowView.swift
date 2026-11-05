@@ -230,11 +230,17 @@ struct NoteWindowView: View {
         audioRecorder.stopPlayback()
         speechRecognizer.stopListening()
         self.note = nil
-        modelContext.delete(noteToDelete)
-        try? modelContext.save()
         windowManager.closeWindow(for: noteID)
-        if let remoteId {
-            SyncEngine.shared.deleteRemoteNote(remoteId: remoteId)
+        if remoteId != nil {
+            noteToDelete.isDeletedLocally = true
+            noteToDelete.syncStatus = .error
+            try? modelContext.save()
+            if let remoteId {
+                SyncEngine.shared.deleteRemoteNote(remoteId: remoteId)
+            }
+        } else {
+            modelContext.delete(noteToDelete)
+            try? modelContext.save()
         }
     }
 }

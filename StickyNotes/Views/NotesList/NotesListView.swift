@@ -18,9 +18,10 @@ struct NotesListView: View {
     @AppStorage("followActiveApp") private var followActiveApp = true
 
     private var filteredNotes: [StickyNote] {
-        if searchText.isEmpty { return notes }
+        let visible = notes.filter { !$0.isDeletedLocally }
+        if searchText.isEmpty { return visible }
         let query = searchText.lowercased()
-        return notes.filter { $0.plainTextContent.lowercased().contains(query) }
+        return visible.filter { $0.plainTextContent.lowercased().contains(query) }
     }
 
     var body: some View {
@@ -306,10 +307,16 @@ struct NotesListView: View {
     private func deleteNote(_ note: StickyNote) {
         windowManager.closeWindow(for: note.id)
         let remoteId = note.remoteId
-        modelContext.delete(note)
-        try? modelContext.save()
-        if let remoteId {
-            syncEngine.deleteRemoteNote(remoteId: remoteId)
+        if remoteId != nil {
+            note.isDeletedLocally = true
+            note.syncStatus = .error
+            try? modelContext.save()
+            if let remoteId {
+                syncEngine.deleteRemoteNote(remoteId: remoteId)
+            }
+        } else {
+            modelContext.delete(note)
+            try? modelContext.save()
         }
     }
 }
