@@ -11,6 +11,7 @@ struct NoteToolbarView: View {
     let onStopDictation: () -> Void
     let onCreateNote: () -> Void
     @Environment(\.colorScheme) private var colorScheme
+    @State private var showNoteMenu = false
 
     var body: some View {
         HStack(spacing: 4) {
@@ -91,32 +92,8 @@ struct NoteToolbarView: View {
     }
 
     private var noteMenu: some View {
-        Menu {
-            Button { onCreateNote() } label: {
-                Label(String(localized: "New Note"), systemImage: "plus")
-            }
-            Divider()
-            Section {
-                ForEach(NoteColor.allCases, id: \.self) { color in
-                    Button {
-                        note.setColor(color)
-                        if let context = note.modelContext {
-                            SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: context)
-                        }
-                    } label: {
-                        Label {
-                            Text(color.displayName)
-                        } icon: {
-                            Image(systemName: note.noteColor == color ? "checkmark.circle.fill" : "circle.fill")
-                                .foregroundStyle(color.background)
-                        }
-                    }
-                }
-            }
-            Divider()
-            Button(role: .destructive) { onDelete() } label: {
-                Label(String(localized: "Delete Note"), systemImage: "trash")
-            }
+        Button {
+            showNoteMenu.toggle()
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 14, weight: .medium))
@@ -124,6 +101,50 @@ struct NoteToolbarView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .menuIndicator(.hidden)
+        .accessibilityLabel(String(localized: "Note Options"))
+        .accessibilityIdentifier("note-options-menu")
+        .accessibilityAddTraits(.isButton)
+        .help(String(localized: "Note Options"))
+        .popover(isPresented: $showNoteMenu, arrowEdge: .bottom) {
+            noteMenuContent
+        }
+    }
+
+    private var noteMenuContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                showNoteMenu = false
+                onCreateNote()
+            } label: {
+                Label(String(localized: "New Note"), systemImage: "plus")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "New Note"))
+            .accessibilityIdentifier("new-note")
+
+            Divider()
+
+            ColorPickerMenu(currentColor: note.noteColor) { color in
+                note.setColor(color)
+                if let context = note.modelContext {
+                    SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: context)
+                }
+                showNoteMenu = false
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                showNoteMenu = false
+                onDelete()
+            } label: {
+                Label(String(localized: "Delete Note"), systemImage: "trash")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(String(localized: "Delete Note"))
+            .accessibilityIdentifier("delete-note")
+        }
+        .padding(12)
+        .frame(minWidth: 180)
     }
 }

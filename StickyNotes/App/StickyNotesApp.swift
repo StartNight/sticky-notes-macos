@@ -10,11 +10,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Always re-open the notes list when clicking the dock icon
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         // Always show the list window — floating note windows don't count as "the main window"
-        for window in sender.windows where window.title == "Sticky Notes" {
+        if let window = sender.windows.first(where: Self.isNotesListWindow) {
             window.makeKeyAndOrderFront(nil)
             return false
         }
         return true
+    }
+
+    private static func isNotesListWindow(_ window: NSWindow) -> Bool {
+        if window.identifier?.rawValue == "notes-list" { return true }
+        if window.level != .normal { return false }
+        let titles: Set<String> = [
+            String(localized: "Notes List"),
+            String(localized: "Sticky Notes"),
+            "Notes List",
+            "Sticky Notes"
+        ]
+        return titles.contains(window.title)
     }
 }
 
@@ -55,15 +67,38 @@ struct StickyNotesApp: App {
     }()
 
     var body: some Scene {
-        WindowGroup(String(localized: "Sticky Notes")) {
+        WindowGroup(String(localized: "Notes List")) {
             NotesListView()
                 .environment(windowManager)
                 .environment(activeWindowTracker)
                 .onAppear { activeWindowTracker.start() }
+                .background(ListWindowAccessor())
         }
         .modelContainer(sharedContainer)
         .defaultSize(width: 320, height: 500)
         .commands {
+            CommandGroup(replacing: .pasteboard) {
+                Button(String(localized: "Cut")) {
+                    NotePasteSupport.cut(in: NSApp.keyWindow)
+                }
+                .keyboardShortcut("x", modifiers: .command)
+
+                Button(String(localized: "Copy")) {
+                    NotePasteSupport.copy(in: NSApp.keyWindow)
+                }
+                .keyboardShortcut("c", modifiers: .command)
+
+                Button(String(localized: "Paste")) {
+                    NotePasteSupport.pasteIntoNote(in: NSApp.keyWindow)
+                }
+                .keyboardShortcut("v", modifiers: .command)
+
+                Button(String(localized: "Select All")) {
+                    NotePasteSupport.selectAll(in: NSApp.keyWindow)
+                }
+                .keyboardShortcut("a", modifiers: .command)
+            }
+
             CommandGroup(replacing: .newItem) {
                 Button(String(localized: "New Note")) {
                     let context = sharedContainer.mainContext

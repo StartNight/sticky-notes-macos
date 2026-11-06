@@ -215,4 +215,69 @@ final class TextEditorProxy {
     private func notifyChange(_ textView: NSTextView) {
         NotificationCenter.default.post(name: NSText.didChangeNotification, object: textView)
     }
+
+    // MARK: - Pasteboard
+
+    func paste() { textView?.paste(nil) }
+    func copySelection() { textView?.copy(nil) }
+    func cutSelection() { textView?.cut(nil) }
+}
+
+/// Forwards system Cut/Copy/Paste/Select All into the note NSTextView.
+/// SwiftUI's default Edit menu targets SwiftUI text fields and swallows ⌘V
+/// when focus is an AppKit NSViewRepresentable editor (or a toolbar control).
+enum NotePasteSupport {
+    enum Action {
+        case cut, copy, paste, selectAll
+    }
+
+    @discardableResult
+    static func pasteIntoNote(in window: NSWindow?) -> Bool {
+        perform(.paste, in: window)
+    }
+
+    @discardableResult
+    static func cut(in window: NSWindow?) -> Bool { perform(.cut, in: window) }
+
+    @discardableResult
+    static func copy(in window: NSWindow?) -> Bool { perform(.copy, in: window) }
+
+    @discardableResult
+    static func selectAll(in window: NSWindow?) -> Bool { perform(.selectAll, in: window) }
+
+    @discardableResult
+    static func perform(_ action: Action, in window: NSWindow?) -> Bool {
+        guard let window else { return false }
+        let selector: Selector
+        switch action {
+        case .cut: selector = #selector(NSText.cut(_:))
+        case .copy: selector = #selector(NSText.copy(_:))
+        case .paste: selector = #selector(NSText.paste(_:))
+        case .selectAll: selector = #selector(NSText.selectAll(_:))
+        }
+
+        if window.firstResponder is NSTextView {
+            return NSApp.sendAction(selector, to: nil, from: nil)
+        }
+        guard let textView = findNoteTextView(in: window.contentView) else {
+            return NSApp.sendAction(selector, to: nil, from: nil)
+        }
+        window.makeFirstResponder(textView)
+        switch action {
+        case .cut: textView.cut(nil)
+        case .copy: textView.copy(nil)
+        case .paste: textView.paste(nil)
+        case .selectAll: textView.selectAll(nil)
+        }
+        return true
+    }
+
+    static func findNoteTextView(in view: NSView?) -> NSTextView? {
+        guard let view else { return nil }
+        if let textView = view as? NSTextView { return textView }
+        for subview in view.subviews {
+            if let found = findNoteTextView(in: subview) { return found }
+        }
+        return nil
+    }
 }

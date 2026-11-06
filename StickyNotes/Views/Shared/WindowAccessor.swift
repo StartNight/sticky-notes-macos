@@ -59,6 +59,7 @@ struct WindowAccessor: NSViewRepresentable {
 
             if let noteID = parent.noteID {
                 window.identifier = NSUserInterfaceItemIdentifier(noteID.uuidString)
+                window.title = String(localized: "Note")
                 window.isExcludedFromWindowsMenu = true
                 window.styleMask.remove(.miniaturizable)
                 window.collectionBehavior.insert([.fullScreenAuxiliary, .ignoresCycle])
@@ -82,5 +83,24 @@ struct WindowAccessor: NSViewRepresentable {
         func windowWillClose(_ notification: Notification) {
             parent.onClose?()
         }
+    }
+}
+
+/// Identifies the notes-list window for dock-reopen and UI automation.
+struct ListWindowAccessor: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { Self.apply(to: view.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { Self.apply(to: nsView.window) }
+    }
+
+    private static func apply(to window: NSWindow?) {
+        guard let window else { return }
+        window.identifier = NSUserInterfaceItemIdentifier("notes-list")
+        window.title = String(localized: "Notes List")
     }
 }

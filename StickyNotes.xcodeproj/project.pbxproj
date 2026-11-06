@@ -24,6 +24,7 @@
 		52327F5608CB3B48680DB018 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = E03440D2E98E2EB7FA1E3381 /* Localizable.xcstrings */; };
 		53123875221DDF8CCEA1605D /* ColorExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2297900470B900CA99A1EE23 /* ColorExtensions.swift */; };
 		550F496734439B63A09B88EF /* ColorExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2297900470B900CA99A1EE23 /* ColorExtensions.swift */; };
+		56E19520CB23415AE02DE919 /* NoteEditorPasteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4830B1D85A26E9B524E3F8C7 /* NoteEditorPasteTests.swift */; };
 		5ED177517D5612505D58BCD0 /* NotesListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFA10ED573A90AB22C21C27D /* NotesListView.swift */; };
 		5F58926A0AB06792AAE1A8AD /* LocalizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4B0246E19DA367FD032A382 /* LocalizationTests.swift */; };
 		6294487BC7E6D4BD155FD2A7 /* ColorPickerMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88FA0193B36885EB9821C43D /* ColorPickerMenu.swift */; };
@@ -64,6 +65,7 @@
 		30F40E07E43105C8EAC7BB02 /* DurationFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DurationFormatting.swift; sourceTree = "<group>"; };
 		330DBE45BB9D76027DFFCD95 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		4723B0D0D563B40BF0AD7211 /* NoteToolbarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteToolbarView.swift; sourceTree = "<group>"; };
+		4830B1D85A26E9B524E3F8C7 /* NoteEditorPasteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteEditorPasteTests.swift; sourceTree = "<group>"; };
 		48F7FAD50DF90DD24DBFF35A /* StickyNotes.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StickyNotes.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		52D260DC782A81409FDFA6CA /* SearchBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchBar.swift; sourceTree = "<group>"; };
 		5BCAE7EFA1C2253248CAF8D2 /* NoteColorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteColorTests.swift; sourceTree = "<group>"; };
@@ -158,6 +160,7 @@
 				F4B0246E19DA367FD032A382 /* LocalizationTests.swift */,
 				5BCAE7EFA1C2253248CAF8D2 /* NoteColorTests.swift */,
 				76201D35267BB20671F1A2B0 /* NoteConverterTests.swift */,
+				4830B1D85A26E9B524E3F8C7 /* NoteEditorPasteTests.swift */,
 				613B306465E5A42CC99145AF /* StickyNoteModelTests.swift */,
 				C11C6A92A9A4E6800C1BBE9C /* SyncEngineTests.swift */,
 				E16EA5B0E513A7F567622BA9 /* TodoAndFormattingTests.swift */,
@@ -347,6 +350,7 @@
 				519E1A385DC6C1916D87879E /* NoteColorTests.swift in Sources */,
 				F6DFDE2465418B0865C9ED90 /* NoteConverter.swift in Sources */,
 				8DDC802A43650C3F8D2F9A32 /* NoteConverterTests.swift in Sources */,
+				56E19520CB23415AE02DE919 /* NoteEditorPasteTests.swift in Sources */,
 				FFAF6B8F1A44E2FC6BB96864 /* StickyNote.swift in Sources */,
 				447B40EBE364DFC448BE735D /* StickyNoteModelTests.swift in Sources */,
 				1E31A5F3DAFF2C121AA6ACDA /* SyncEngine.swift in Sources */,

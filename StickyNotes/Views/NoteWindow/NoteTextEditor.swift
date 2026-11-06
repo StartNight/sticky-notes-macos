@@ -110,6 +110,17 @@ struct NoteTextEditor: NSViewRepresentable {
 final class ClickableTextView: NSTextView {
     var proxy: TextEditorProxy?
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window === window else { return }
+            if window.firstResponder == nil || window.firstResponder === window {
+                window.makeFirstResponder(self)
+            }
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let charIndex = characterIndexForInsertion(at: point)

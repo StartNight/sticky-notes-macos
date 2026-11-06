@@ -75,4 +75,21 @@ final class LocalizationTests: XCTestCase {
         XCTAssertGreaterThan(total, 0)
         XCTAssertEqual(missing.sorted(), [], "源码中未收录到 xcstrings 的文案: \(missing.sorted())")
     }
+
+    func testListAndNoteWindowTitlesDiffer() throws {
+        let strings = try loadCatalog()
+        let listZh = value(strings["Notes List"], lang: "zh-Hans").value
+        let noteZh = value(strings["Note"], lang: "zh-Hans").value
+        let listEn = value(strings["Notes List"], lang: "en").value
+        let noteEn = value(strings["Note"], lang: "en").value
+        XCTAssertEqual(listZh, "便签列表")
+        XCTAssertEqual(noteZh, "便签")
+        XCTAssertEqual(listEn, "Notes List")
+        XCTAssertEqual(noteEn, "Note")
+        XCTAssertNotEqual(listZh, noteZh, "中文下列表窗与便签窗标题不能都叫「便签」")
+        XCTAssertNotEqual(listEn, noteEn)
+        XCTAssertEqual(value(strings["Note Options"], lang: "zh-Hans").value, "便签选项")
+        XCTAssertEqual(value(strings["Delete Note"], lang: "zh-Hans").value, "删除便签")
+        XCTAssertEqual(value(strings["Paste"], lang: "zh-Hans").value, "粘贴")
+    }
 }

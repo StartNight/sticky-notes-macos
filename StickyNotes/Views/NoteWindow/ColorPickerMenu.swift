@@ -27,6 +27,9 @@ struct ColorPickerMenu: View {
                 }
                 .buttonStyle(.plain)
                 .help(color.displayName)
+                .accessibilityLabel(color.displayName)
+                .accessibilityIdentifier("note-color-\(color.rawValue)")
+                .accessibilityAddTraits(color == currentColor ? [.isButton, .isSelected] : .isButton)
             }
         }
     }
