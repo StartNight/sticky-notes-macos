@@ -39,6 +39,8 @@ final class StickyNote {
     var lastSyncedAt: Date?
     /// Tombstone: note was deleted locally and is waiting for a successful remote DELETE.
     var isDeletedLocally: Bool = false
+    /// Last known modern `_Note` JSON from Graph, used to merge color without wiping OWA document data.
+    var webNoteJSON: String?
 
     var syncStatus: SyncStatus {
         get { SyncStatus(rawValue: syncStatusRaw) ?? .pendingUpload }
@@ -125,6 +127,7 @@ final class StickyNote {
         self.syncStatusRaw = syncStatus.rawValue
         self.lastSyncedAt = lastSyncedAt
         self.isDeletedLocally = false
+        self.webNoteJSON = nil
     }
 
     // MARK: - Mutations

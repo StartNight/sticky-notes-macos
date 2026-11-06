@@ -50,7 +50,6 @@ final class SyncEngine {
 
     private let authManager = AuthManager.shared
     private let graphEndpoint = "https://graph.microsoft.com/v1.0"
-    private let noteColorExtendedPropertyId = "Integer {0006200e-0000-0000-c000-000000000046} Id 0x8b00"
     private var debounceTasks: [UUID: Task<Void, Never>] = [:]
     private var periodicTimer: Timer?
     /// Remote IDs deleted locally whose DELETE has not yet succeeded (in-memory retry queue).
@@ -101,7 +100,9 @@ final class SyncEngine {
     // MARK: - Pull Remote Notes
 
     private func pullNotes(token: String, modelContext: ModelContext, retryAuthOnFailure: Bool = true) async throws {
-        let expandClause = "singleValueExtendedProperties($filter=id eq '\(noteColorExtendedPropertyId)')"
+        let lidId = NoteConverter.pidLidNoteColorPropertyId
+        let webId = NoteConverter.webNoteJSONPropertyId
+        let expandClause = "singleValueExtendedProperties($filter=id eq '\(lidId)' or id eq '\(webId)')"
         let encodedExpand = expandClause.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? expandClause
         let urlString = "\(graphEndpoint)/me/mailFolders/notes/messages?$top=100&$orderby=lastModifiedDateTime%20desc&$select=id,changeKey,subject,body,createdDateTime,lastModifiedDateTime&$expand=\(encodedExpand)"
         guard let url = URL(string: urlString) else { return }
@@ -156,16 +157,12 @@ final class SyncEngine {
             let remoteModifiedDate = Self.plausibleGraphDate(msg["lastModifiedDateTime"] as? String)
             let remoteCreatedDate = Self.plausibleGraphDate(msg["createdDateTime"] as? String)
 
-            // Extract color if available
-            var noteColor = NoteColor.yellow
-            if let props = msg["singleValueExtendedProperties"] as? [[String: Any]] {
-                for prop in props {
-                    if let propId = prop["id"] as? String, (propId.contains("0x8b00") || propId.contains("0x8B00") || propId.contains("0x35E0")),
-                       let valStr = prop["value"] as? String, let code = Int(valStr) {
-                        noteColor = NoteConverter.noteColor(fromOutlookCode: code)
-                    }
-                }
-            }
+            // Prefer modern `_Note.color` (what web Sticky Notes reads); fall back to 0x8B00.
+            let extracted = NoteConverter.extractNoteColor(
+                fromExtendedProperties: (msg["singleValueExtendedProperties"] as? [[String: Any]]) ?? []
+            )
+            let noteColor = extracted.color
+            let webNoteJSON = extracted.webNoteJSON
 
             let existingLocal = localByRemoteId[remoteId]
             if pendingRemoteDeletes.contains(remoteId) || existingLocal?.isDeletedLocally == true {
@@ -188,7 +185,10 @@ final class SyncEngine {
             if let localNote = existingLocal {
                 // Note exists locally
                 if localNote.changeKey == changeKey {
-                    // No remote changes
+                    // Still cache `_Note` JSON so a later color-only upload can merge into it.
+                    if let webNoteJSON {
+                        localNote.webNoteJSON = webNoteJSON
+                    }
                     continue
                 }
 
@@ -210,6 +210,7 @@ final class SyncEngine {
                         let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
                         localNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
                         localNote.noteColor = noteColor
+                        if let webNoteJSON { localNote.webNoteJSON = webNoteJSON }
                         localNote.changeKey = changeKey
                         localNote.modifiedAt = StickyNote.resolvedModifiedAt(local: localNote.modifiedAt, remote: remoteModifiedDate)
                         if let remoteCreatedDate { localNote.createdAt = remoteCreatedDate }
@@ -225,6 +226,7 @@ final class SyncEngine {
                     let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
                     localNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
                     localNote.noteColor = noteColor
+                    if let webNoteJSON { localNote.webNoteJSON = webNoteJSON }
                     localNote.changeKey = changeKey
                     localNote.modifiedAt = StickyNote.resolvedModifiedAt(local: localNote.modifiedAt, remote: remoteModifiedDate)
                     if let remoteCreatedDate { localNote.createdAt = remoteCreatedDate }
@@ -245,6 +247,7 @@ final class SyncEngine {
                 newNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
                 newNote.createdAt = remoteCreatedDate ?? Date()
                 newNote.modifiedAt = remoteModifiedDate ?? remoteCreatedDate ?? Date()
+                newNote.webNoteJSON = webNoteJSON
                 modelContext.insert(newNote)
             }
         }
@@ -311,12 +314,10 @@ final class SyncEngine {
                 "contentType": "html",
                 "content": html
             ],
-            "singleValueExtendedProperties": [
-                [
-                    "id": noteColorExtendedPropertyId,
-                    "value": "\(NoteConverter.outlookColorCode(for: note.noteColor))"
-                ]
-            ]
+            "singleValueExtendedProperties": NoteConverter.graphColorExtendedProperties(
+                for: note.noteColor,
+                existingWebNoteJSON: note.webNoteJSON
+            )
         ]
 
         let jsonData = try JSONSerialization.data(withJSONObject: payload)
@@ -486,6 +487,7 @@ final class SyncEngine {
         }
 
         applyGraphTimestamps(json, to: note)
+        note.webNoteJSON = NoteConverter.webNoteJSON(setting: note.noteColor, existing: note.webNoteJSON)
         note.syncStatus = .synced
         note.lastSyncedAt = Date()
     }

@@ -90,4 +90,46 @@ final class NoteColorTests: XCTestCase {
         let data = try JSONEncoder().encode("orange")
         XCTAssertEqual(try JSONDecoder().decode(NoteColor.self, from: data), .charcoal)
     }
+
+    func testWebNoteJSONSetsOfficialColorAndPreservesDocument() throws {
+        let existing = """
+        {"schemaVersion":"beta","document":{"type":"document"},"color":0,"#type.color":"Int32"}
+        """
+        let updated = NoteConverter.webNoteJSON(setting: .charcoal, existing: existing)
+        let data = try XCTUnwrap(updated.data(using: .utf8))
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(obj["color"] as? Int, 6)
+        XCTAssertEqual(obj["#type.color"] as? String, "Int32")
+        let document = try XCTUnwrap(obj["document"] as? [String: Any])
+        XCTAssertEqual(document["type"] as? String, "document")
+        XCTAssertEqual(NoteConverter.noteColor(fromWebNoteJSON: updated), .charcoal)
+    }
+
+    func testExtractPrefersWebNoteJSONColorOverPidLid() {
+        let props: [[String: Any]] = [
+            ["id": NoteConverter.pidLidNoteColorPropertyId, "value": "0"],
+            ["id": NoteConverter.webNoteJSONPropertyId, "value": "{\"color\":6,\"#type.color\":\"Int32\"}"]
+        ]
+        let extracted = NoteConverter.extractNoteColor(fromExtendedProperties: props)
+        XCTAssertEqual(extracted.color, .charcoal)
+        XCTAssertEqual(NoteConverter.noteColor(fromWebNoteJSON: extracted.webNoteJSON ?? ""), .charcoal)
+    }
+
+    func testGraphColorExtendedPropertiesIncludeWebNotePayload() throws {
+        for (color, code) in [
+            (NoteColor.yellow, 0), (.green, 1), (.pink, 2), (.purple, 3),
+            (.blue, 4), (.gray, 5), (.charcoal, 6)
+        ] {
+            let props = NoteConverter.graphColorExtendedProperties(for: color, existingWebNoteJSON: nil)
+            XCTAssertEqual(props.count, 2)
+            XCTAssertEqual(props[0]["id"] as? String, NoteConverter.pidLidNoteColorPropertyId)
+            XCTAssertEqual(props[0]["value"] as? String, "\(code)")
+            XCTAssertEqual(props[1]["id"] as? String, NoteConverter.webNoteJSONPropertyId)
+            let json = try XCTUnwrap(props[1]["value"] as? String)
+            XCTAssertEqual(NoteConverter.noteColor(fromWebNoteJSON: json), color)
+            let data = try XCTUnwrap(json.data(using: .utf8))
+            let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertEqual(obj["color"] as? Int, code, "\(color.rawValue) 的 _Note.color")
+        }
+    }
 }

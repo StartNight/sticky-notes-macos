@@ -10,6 +10,7 @@ final class SyncEngineTests: XCTestCase {
     private var container: ModelContainer!
     private var ctx: ModelContext { container.mainContext }
     nonisolated private let colorPropId = "Integer {0006200e-0000-0000-c000-000000000046} Id 0x8b00"
+    nonisolated private let webNotePropId = "String {00020329-0000-0000-c000-000000000046} Name _Note"
 
     override func setUp() async throws {
         URLProtocol.registerClass(MockURLProtocol.self)
@@ -29,6 +30,18 @@ final class SyncEngineTests: XCTestCase {
         guard let b = r.body else { return nil }
         return try? JSONSerialization.jsonObject(with: b) as? [String: Any]
     }
+
+    private func propValue(_ props: [[String: Any]], id: String) -> String? {
+        props.first { ($0["id"] as? String) == id }?["value"] as? String
+    }
+
+    private func assertWebNoteColor(_ props: [[String: Any]], expected: Int) throws {
+        let json = try XCTUnwrap(self.propValue(props, id: self.webNotePropId), "请求体缺少网页端 _Note JSON")
+        let data = try XCTUnwrap(json.data(using: .utf8))
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(obj["color"] as? Int, expected, "网页端 _Note.color 应为 \(expected)")
+    }
+
 
     nonisolated private func message(id: String, changeKey: String, html: String, color: Int?, modified: String = "2030-01-01T00:00:00Z") -> [String: Any] {
         var m: [String: Any] = [
@@ -63,8 +76,8 @@ final class SyncEngineTests: XCTestCase {
         let body = try XCTUnwrap(bodyJSON(req))
         XCTAssertEqual(body["subject"] as? String, "Hello")
         let props = try XCTUnwrap(body["singleValueExtendedProperties"] as? [[String: Any]])
-        XCTAssertEqual(props.first?["id"] as? String, colorPropId)
-        XCTAssertEqual(props.first?["value"] as? String, "1", "green -> PidLidNoteColor 1")
+        XCTAssertEqual(self.propValue(props, id: self.colorPropId), "1", "green -> PidLidNoteColor 1")
+        try self.assertWebNoteColor(props, expected: 1)
         let content = (body["body"] as? [String: Any])?["content"] as? String
         XCTAssertEqual(content, "<div>Hello<br/>World</div>")
     }
@@ -79,7 +92,9 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(req.url.absoluteString, "https://graph.microsoft.com/v1.0/me/notes/R-9")
         XCTAssertEqual(note.changeKey, "CK-NEW")
         XCTAssertEqual(note.syncStatus, .synced)
-        XCTAssertEqual(((bodyJSON(req)?["singleValueExtendedProperties"] as? [[String: Any]])?.first?["value"] as? String), "4", "blue -> official color code 4")
+        let props = try XCTUnwrap(bodyJSON(req)?["singleValueExtendedProperties"] as? [[String: Any]])
+        XCTAssertEqual(self.propValue(props, id: self.colorPropId), "4", "blue -> official color code 4")
+        try self.assertWebNoteColor(props, expected: 4)
     }
 
     func testEmptyNoteUploadUsesNewNoteSubject() async throws {
@@ -250,6 +265,7 @@ final class SyncEngineTests: XCTestCase {
         let get = try XCTUnwrap(MockURLProtocol.requests.first)
         XCTAssertEqual(get.method, "GET")
         XCTAssertTrue(get.url.absoluteString.contains("0x8b00"), "拉取请求应 expand 0x8b00 扩展属性")
+        XCTAssertTrue(get.url.absoluteString.contains("_Note") || get.url.absoluteString.contains("%5FNote") || get.url.absoluteString.lowercased().contains("name%20_note") || get.url.absoluteString.contains("Name%20_Note"), "拉取请求应 expand 网页端 _Note JSON")
     }
 
     func testSyncAllNetworkDownSetsErrorAndKeepsPending() async throws {
@@ -488,6 +504,76 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertNotNil(body["receivedDateTime"] as? String)
         XCTAssertNotNil(body["sentDateTime"] as? String)
         XCTAssertGreaterThanOrEqual(note.modifiedAt, SyncEngine.parseGraphDate("2026-11-06T00:00:00Z")!)
+    }
+
+
+    func testUploadWritesWebNoteJSONColorForAllOfficialColors() async throws {
+        let expected: [(NoteColor, Int)] = [
+            (.yellow, 0), (.green, 1), (.pink, 2), (.purple, 3),
+            (.blue, 4), (.gray, 5), (.charcoal, 6)
+        ]
+        for (color, code) in expected {
+            MockURLProtocol.reset()
+            MockURLProtocol.handler = { _ in
+                .http(status: 201, json: [
+                    "id": "R-\(color.rawValue)",
+                    "changeKey": "CK",
+                    "body": ["contentType": "html", "content": "<div>swatch</div>"]
+                ])
+            }
+            let note = StickyNote(color: color, content: "swatch")
+            ctx.insert(note)
+            try await SyncEngine().uploadNote(note, token: "t")
+            let req = try XCTUnwrap(MockURLProtocol.requests.first)
+            XCTAssertEqual(req.method, "POST")
+            let props = try XCTUnwrap(self.bodyJSON(req)?["singleValueExtendedProperties"] as? [[String: Any]])
+            XCTAssertEqual(self.propValue(props, id: self.colorPropId), "\(code)")
+            try self.assertWebNoteColor(props, expected: code)
+        }
+    }
+
+    func testPullPrefersWebNoteJSONColorOverPidLid() async throws {
+        MockURLProtocol.handler = { _ in
+            .http(status: 200, json: [
+                "value": [[
+                    "id": "R-WEB",
+                    "changeKey": "K1",
+                    "subject": "s",
+                    "body": ["contentType": "html", "content": "<div>web color</div>"],
+                    "createdDateTime": "2026-01-01T00:00:00Z",
+                    "lastModifiedDateTime": "2030-01-01T00:00:00Z",
+                    "singleValueExtendedProperties": [
+                        ["id": self.colorPropId, "value": "0"],
+                        ["id": self.webNotePropId, "value": "{\"color\":6,\"#type.color\":\"Int32\"}"]
+                    ]
+                ]]
+            ])
+        }
+        await SyncEngine().syncAll(modelContext: ctx)
+        let notes = ((try? ctx.fetch(FetchDescriptor<StickyNote>())) ?? [])
+        let remote = try XCTUnwrap(notes.first { $0.remoteId == "R-WEB" })
+        XCTAssertEqual(remote.noteColor, .charcoal, "网页 _Note.color=6 应覆盖 0x8B00=0")
+    }
+
+    func testUploadMergesColorIntoExistingWebNoteJSONDocument() async throws {
+        MockURLProtocol.handler = { _ in
+            .http(status: 200, json: [
+                "id": "R-9",
+                "changeKey": "CK-NEW",
+                "body": ["contentType": "html", "content": "<div>keep</div>"]
+            ])
+        }
+        let note = StickyNote(color: .purple, content: "keep", remoteId: "R-9", changeKey: "CK-OLD")
+        note.webNoteJSON = "{\"schemaVersion\":\"beta\",\"document\":{\"type\":\"document\"},\"color\":0}"
+        ctx.insert(note)
+        try await SyncEngine().uploadNote(note, token: "t")
+        let req = try XCTUnwrap(MockURLProtocol.requests.first { $0.method == "PATCH" })
+        let props = try XCTUnwrap(self.bodyJSON(req)?["singleValueExtendedProperties"] as? [[String: Any]])
+        try self.assertWebNoteColor(props, expected: 3)
+        let json = try XCTUnwrap(self.propValue(props, id: self.webNotePropId))
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: try XCTUnwrap(json.data(using: .utf8))) as? [String: Any])
+        let document = try XCTUnwrap(obj["document"] as? [String: Any])
+        XCTAssertEqual(document["type"] as? String, "document", "改色不得覆盖网页端 document")
     }
 
     func testParseGraphDateAcceptsLongFractionalSecondsAndRejectsSentinel() {

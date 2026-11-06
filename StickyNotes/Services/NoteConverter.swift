@@ -162,6 +162,95 @@ struct NoteConverter {
         }
     }
 
+    /// Classic Outlook desktop color (MS-OXONOTE PidLidNoteColor). Web Sticky Notes
+    /// ignore this and read `color` inside the `_Note` JSON blob instead
+    /// (see https://stackoverflow.com/questions/67943130).
+    static let pidLidNoteColorPropertyId = "Integer {0006200e-0000-0000-c000-000000000046} Id 0x8b00"
+
+    /// PS_PUBLIC_STRINGS named property used by OWA / Outlook on the web.
+    static let webNoteJSONPropertyId = "String {00020329-0000-0000-c000-000000000046} Name _Note"
+
+    static func isPidLidNoteColorProperty(_ id: String) -> Bool {
+        let lower = id.lowercased()
+        return lower.contains("0x8b00") || lower.contains("0x35e0")
+    }
+
+    static func isWebNoteJSONProperty(_ id: String) -> Bool {
+        let lower = id.lowercased().replacingOccurrences(of: "  ", with: " ")
+        return lower.contains("name _note")
+    }
+
+    static func noteColor(fromWebNoteJSON json: String) -> NoteColor? {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let code: Int?
+        if let value = obj["color"] as? Int {
+            code = value
+        } else if let value = obj["color"] as? NSNumber {
+            code = value.intValue
+        } else if let value = obj["color"] as? String {
+            code = Int(value)
+        } else {
+            code = nil
+        }
+        guard let code else { return nil }
+        return noteColor(fromOutlookCode: code)
+    }
+
+    /// Merge `color` into an existing modern `_Note` JSON document so we do not
+    /// wipe OWA's canvas/document payload when only the color changed.
+    static func webNoteJSON(setting color: NoteColor, existing: String?) -> String {
+        var obj: [String: Any] = [:]
+        if let existing, let data = existing.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            obj = parsed
+        }
+        if obj["schemaVersion"] == nil {
+            obj["schemaVersion"] = "beta"
+        }
+        obj["color"] = outlookColorCode(for: color)
+        obj["#type.color"] = "Int32"
+        obj["color@Is.Queryable"] = "True"
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let text = String(data: data, encoding: .utf8) else {
+            return "{\"color\":\(outlookColorCode(for: color)),\"#type.color\":\"Int32\"}"
+        }
+        return text
+    }
+
+    static func graphColorExtendedProperties(for color: NoteColor, existingWebNoteJSON: String?) -> [[String: Any]] {
+        [
+            [
+                "id": pidLidNoteColorPropertyId,
+                "value": "\(outlookColorCode(for: color))"
+            ],
+            [
+                "id": webNoteJSONPropertyId,
+                "value": webNoteJSON(setting: color, existing: existingWebNoteJSON)
+            ]
+        ]
+    }
+
+    static func extractNoteColor(fromExtendedProperties props: [[String: Any]]) -> (color: NoteColor, webNoteJSON: String?) {
+        var lidColor: NoteColor?
+        var webColor: NoteColor?
+        var webJSON: String?
+        for prop in props {
+            guard let propId = prop["id"] as? String else { continue }
+            if isWebNoteJSONProperty(propId), let value = prop["value"] as? String {
+                webJSON = value
+                webColor = noteColor(fromWebNoteJSON: value)
+            } else if isPidLidNoteColorProperty(propId),
+                      let value = prop["value"] as? String,
+                      let code = Int(value) {
+                lidColor = noteColor(fromOutlookCode: code)
+            }
+        }
+        return (webColor ?? lidColor ?? .yellow, webJSON)
+    }
+
     // MARK: - Internal Helpers
 
     private static var defaultAttributes: [NSAttributedString.Key: Any] {
