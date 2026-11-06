@@ -42,7 +42,7 @@ final class AuthManager: NSObject {
         return "msauth.com.shenanigans.sticky-notes"
     }
 
-    private let scopes = "Mail.ReadWrite offline_access User.Read"
+    private let scopes = "Mail.ReadWrite ShortNotes.ReadWrite offline_access User.Read"
     private let keychain = KeychainHelper.shared
     private var currentAuthSession: ASWebAuthenticationSession?
 

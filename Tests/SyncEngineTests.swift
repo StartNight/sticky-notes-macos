@@ -43,7 +43,7 @@ final class SyncEngineTests: XCTestCase {
     // MARK: Upload (push)
 
     func testUploadNewNotePostsWith0x8b00AndBecomesSynced() async throws {
-        MockURLProtocol.handler = { _ in .http(status: 201, json: ["id": "R-1", "changeKey": "CK-1"]) }
+        MockURLProtocol.handler = { _ in .http(status: 201, json: ["id": "R-1", "changeKey": "CK-1", "body": ["contentType": "html", "content": "<div>Hello<br/>World</div>"]]) }
         let note = StickyNote(color: .green, content: "Hello\nWorld")
         ctx.insert(note)
         XCTAssertEqual(note.syncStatus, .pendingUpload)
@@ -58,7 +58,7 @@ final class SyncEngineTests: XCTestCase {
         let req = try XCTUnwrap(MockURLProtocol.requests.first)
         XCTAssertEqual(MockURLProtocol.requests.count, 1)
         XCTAssertEqual(req.method, "POST")
-        XCTAssertEqual(req.url.absoluteString, "https://graph.microsoft.com/v1.0/me/mailFolders/notes/messages")
+        XCTAssertEqual(req.url.absoluteString, "https://graph.microsoft.com/v1.0/me/notes")
         XCTAssertEqual(req.headers["Authorization"], "Bearer t")
         let body = try XCTUnwrap(bodyJSON(req))
         XCTAssertEqual(body["subject"] as? String, "Hello")
@@ -70,13 +70,13 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testUploadExistingNoteUsesPatch() async throws {
-        MockURLProtocol.handler = { _ in .http(status: 200, json: ["id": "R-9", "changeKey": "CK-NEW"]) }
+        MockURLProtocol.handler = { _ in .http(status: 200, json: ["id": "R-9", "changeKey": "CK-NEW", "body": ["contentType": "html", "content": "<div>x</div>"]]) }
         let note = StickyNote(color: .blue, content: "x", remoteId: "R-9", changeKey: "CK-OLD")
         ctx.insert(note)
         try await SyncEngine().uploadNote(note, token: "t")
         let req = try XCTUnwrap(MockURLProtocol.requests.first)
         XCTAssertEqual(req.method, "PATCH")
-        XCTAssertEqual(req.url.absoluteString, "https://graph.microsoft.com/v1.0/me/messages/R-9")
+        XCTAssertEqual(req.url.absoluteString, "https://graph.microsoft.com/v1.0/me/notes/R-9")
         XCTAssertEqual(note.changeKey, "CK-NEW")
         XCTAssertEqual(note.syncStatus, .synced)
         XCTAssertEqual(((bodyJSON(req)?["singleValueExtendedProperties"] as? [[String: Any]])?.first?["value"] as? String), "0")
@@ -130,7 +130,90 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(AuthManager.shared.refreshCallCount, 1)
     }
 
+    func testUploadDoesNotMarkSyncedWhenServerReturnsStaleBody() async {
+        MockURLProtocol.handler = { _ in
+            .http(status: 200, json: [
+                "id": "R-9",
+                "changeKey": "CK-NEW",
+                "body": ["contentType": "html", "content": "<div>old cloud text</div>"]
+            ])
+        }
+        let note = StickyNote(color: .blue, content: "new local text", remoteId: "R-9", changeKey: "CK-OLD")
+        ctx.insert(note)
+        do {
+            try await SyncEngine().uploadNote(note, token: "t")
+            XCTFail("正文未写回时不应视为成功")
+        } catch {
+            XCTAssertEqual((error as NSError).code, -3)
+        }
+        XCTAssertEqual(note.syncStatus, .error)
+        XCTAssertEqual(note.changeKey, "CK-OLD", "假成功响应不得覆盖本地 changeKey")
+        XCTAssertEqual(note.remoteId, "R-9")
+        XCTAssertEqual(MockURLProtocol.requests.first?.method, "PATCH")
+        XCTAssertEqual(MockURLProtocol.requests.first?.url.absoluteString, "https://graph.microsoft.com/v1.0/me/notes/R-9")
+    }
+
+    func testUploadEmpty204IsNotTreatedAsSuccess() async {
+        MockURLProtocol.handler = { _ in .http(status: 204, json: nil) }
+        let note = StickyNote(content: "edited", remoteId: "R-9", changeKey: "CK-OLD")
+        ctx.insert(note)
+        do {
+            try await SyncEngine().uploadNote(note, token: "t")
+            XCTFail("空 204 不应视为已同步")
+        } catch {
+            XCTAssertEqual((error as NSError).code, -3)
+        }
+        XCTAssertEqual(note.syncStatus, .error)
+    }
+
+    func testUploadFallsBackToRecreateWhenNotesApiForbidden() async throws {
+        MockURLProtocol.handler = { req in
+            switch req.httpMethod {
+            case "PATCH":
+                return .http(status: 403, json: ["error": "forbidden"])
+            case "POST":
+                return .http(status: 201, json: [
+                    "id": "R-NEW",
+                    "changeKey": "CK2",
+                    "body": ["contentType": "html", "content": "<div>x</div>"]
+                ])
+            case "DELETE":
+                return .http(status: 204, json: nil)
+            default:
+                return .http(status: 500, json: [:])
+            }
+        }
+        let note = StickyNote(content: "x", remoteId: "R-OLD", changeKey: "CK1")
+        ctx.insert(note)
+        try await SyncEngine().uploadNote(note, token: "t", retryAuthOnFailure: false)
+        XCTAssertEqual(note.syncStatus, .synced)
+        XCTAssertEqual(note.remoteId, "R-NEW")
+        XCTAssertEqual(note.changeKey, "CK2")
+        XCTAssertEqual(MockURLProtocol.requests.map(\.method), ["PATCH", "POST", "DELETE"])
+        XCTAssertEqual(MockURLProtocol.requests[0].url.absoluteString, "https://graph.microsoft.com/v1.0/me/notes/R-OLD")
+        XCTAssertEqual(MockURLProtocol.requests[1].url.absoluteString, "https://graph.microsoft.com/v1.0/me/mailFolders/notes/messages")
+        XCTAssertEqual(MockURLProtocol.requests[2].url.absoluteString, "https://graph.microsoft.com/v1.0/me/messages/R-OLD")
+    }
+
+    func testSyncAllDoesNotReportSyncedWhenPushFailsAfterPull() async throws {
+        let note = StickyNote(content: "local edit", remoteId: "R-1", changeKey: "OLD", syncStatus: .pendingUpload)
+        ctx.insert(note)
+        let engine = SyncEngine()
+        MockURLProtocol.handler = { req in
+            if req.httpMethod == "GET" {
+                return .http(status: 200, json: ["value": []])
+            }
+            return .http(status: 200, json: ["id": "R-1", "changeKey": "OLD"])
+        }
+        await engine.syncAll(modelContext: ctx)
+        if case .error = engine.state {} else {
+            XCTFail("上传假成功时引擎状态仍为 \(engine.state)，UI 会显示已同步")
+        }
+        XCTAssertEqual(note.syncStatus, .error)
+    }
+
     // MARK: Full sync state machine
+
 
     func testSyncAllUnauthenticatedGoesOffline() async {
         AuthManager.shared.isAuthenticated = false

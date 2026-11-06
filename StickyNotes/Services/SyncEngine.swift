@@ -265,6 +265,7 @@ final class SyncEngine {
         )
         let pendingNotes = (try? modelContext.fetch(descriptor)) ?? []
 
+        var uploadFailures = 0
         for note in pendingNotes {
             if note.isDeletedLocally { continue }
             do {
@@ -272,10 +273,19 @@ final class SyncEngine {
             } catch {
                 print("Failed to push note \(note.id): \(error)")
                 note.syncStatus = .error
+                uploadFailures += 1
             }
         }
 
         try? modelContext.save()
+
+        if uploadFailures > 0 {
+            throw NSError(
+                domain: "SyncEngine",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "Failed to upload \(uploadFailures) note(s)"]
+            )
+        }
     }
 
     // MARK: - Upload Single Note (Create or Update)
@@ -313,12 +323,15 @@ final class SyncEngine {
         let jsonData = try JSONSerialization.data(withJSONObject: payload)
 
         if let remoteId = note.remoteId {
-            // PATCH existing message
-            guard let url = URL(string: "\(graphEndpoint)/me/messages/\(remoteId)") else { return }
+            guard let url = graphItemURL(collection: "me/notes", id: remoteId) else {
+                note.syncStatus = .error
+                throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid note URL"])
+            }
             var request = URLRequest(url: url)
             request.httpMethod = "PATCH"
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("return=representation", forHTTPHeaderField: "Prefer")
             request.httpBody = jsonData
 
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -330,6 +343,14 @@ final class SyncEngine {
             if (httpResponse.statusCode == 401 || httpResponse.statusCode == 403) && retryAuthOnFailure {
                 let newToken = try await authManager.refreshTokens()
                 return try await uploadNote(note, token: newToken, retryAuthOnFailure: false)
+            }
+
+            // /me/notes requires ShortNotes.ReadWrite. Existing Mail.ReadWrite
+            // sessions get 403/404; Graph also silently no-ops body writes on
+            // PATCH /me/messages for non-draft notes. Recreate instead.
+            if [400, 403, 404].contains(httpResponse.statusCode) {
+                try await replaceRemoteNote(note, token: token, payloadData: jsonData, uploadedHTML: html)
+                return
             }
 
             guard (200...299).contains(httpResponse.statusCode) else {
@@ -341,30 +362,22 @@ final class SyncEngine {
                 ])
             }
 
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let newChangeKey = json["changeKey"] as? String {
-                note.changeKey = newChangeKey
-            }
-            note.syncStatus = .synced
-            note.lastSyncedAt = Date()
+            try finishUpload(note, data: data, uploadedHTML: html, isCreate: false)
         } else {
-            // POST new message to notes folder
-            guard let url = URL(string: "\(graphEndpoint)/me/mailFolders/notes/messages") else { return }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = jsonData
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
+            guard let notesURL = URL(string: "\(graphEndpoint)/me/notes") else {
                 note.syncStatus = .error
-                throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
+                throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid notes URL"])
             }
+            let (data, httpResponse) = try await sendJSON(url: notesURL, method: "POST", token: token, body: jsonData)
 
             if (httpResponse.statusCode == 401 || httpResponse.statusCode == 403) && retryAuthOnFailure {
                 let newToken = try await authManager.refreshTokens()
                 return try await uploadNote(note, token: newToken, retryAuthOnFailure: false)
+            }
+
+            if [400, 403, 404].contains(httpResponse.statusCode) {
+                try await createNoteInMailFolder(note, token: token, payloadData: jsonData, uploadedHTML: html)
+                return
             }
 
             guard (200...299).contains(httpResponse.statusCode) else {
@@ -376,15 +389,104 @@ final class SyncEngine {
                 ])
             }
 
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let newId = json["id"] as? String,
-               let newChangeKey = json["changeKey"] as? String {
-                note.remoteId = newId
-                note.changeKey = newChangeKey
-            }
-            note.syncStatus = .synced
-            note.lastSyncedAt = Date()
+            try finishUpload(note, data: data, uploadedHTML: html, isCreate: true)
         }
+    }
+
+    /// Mail.ReadWrite fallback: create a replacement note then delete the old one.
+    /// PATCH /me/messages cannot persist body/subject on non-draft Outlook notes.
+    private func replaceRemoteNote(_ note: StickyNote, token: String, payloadData: Data, uploadedHTML: String) async throws {
+        let oldId = note.remoteId
+        try await createNoteInMailFolder(note, token: token, payloadData: payloadData, uploadedHTML: uploadedHTML)
+        if let oldId {
+            do {
+                try await performRemoteDelete(remoteId: oldId, token: token)
+            } catch {
+                print("Replacement created but failed to delete previous note \(oldId): \(error)")
+            }
+        }
+    }
+
+    private func createNoteInMailFolder(_ note: StickyNote, token: String, payloadData: Data, uploadedHTML: String) async throws {
+        guard let url = URL(string: "\(graphEndpoint)/me/mailFolders/notes/messages") else {
+            note.syncStatus = .error
+            throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid notes folder URL"])
+        }
+        let (data, httpResponse) = try await sendJSON(url: url, method: "POST", token: token, body: payloadData)
+        guard (200...299).contains(httpResponse.statusCode) else {
+            note.syncStatus = .error
+            let responseBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw NSError(domain: "SyncEngine", code: httpResponse.statusCode, userInfo: [
+                NSLocalizedDescriptionKey: "Failed to create note (HTTP \(httpResponse.statusCode)): \(responseBody)"
+            ])
+        }
+        try finishUpload(note, data: data, uploadedHTML: uploadedHTML, isCreate: true)
+    }
+
+    private func sendJSON(url: URL, method: String, token: String, body: Data) async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("return=representation", forHTTPHeaderField: "Prefer")
+        request.httpBody = body
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
+        }
+        return (data, httpResponse)
+    }
+
+    /// Never mark synced unless Graph returned a usable object. An empty 204/200
+    /// or a 200 that echoes the old body is the false-success we must reject.
+    private func finishUpload(_ note: StickyNote, data: Data, uploadedHTML: String, isCreate: Bool) throws {
+        guard !data.isEmpty,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            note.syncStatus = .error
+            throw NSError(domain: "SyncEngine", code: -3, userInfo: [
+                NSLocalizedDescriptionKey: "Upload response was empty; refusing to mark synced"
+            ])
+        }
+
+        if isCreate {
+            guard let newId = json["id"] as? String, !newId.isEmpty,
+                  let newChangeKey = json["changeKey"] as? String, !newChangeKey.isEmpty else {
+                note.syncStatus = .error
+                throw NSError(domain: "SyncEngine", code: -3, userInfo: [
+                    NSLocalizedDescriptionKey: "Create response missing id/changeKey; refusing to mark synced"
+                ])
+            }
+            note.remoteId = newId
+            note.changeKey = newChangeKey
+        } else {
+            guard let newChangeKey = json["changeKey"] as? String, !newChangeKey.isEmpty else {
+                note.syncStatus = .error
+                throw NSError(domain: "SyncEngine", code: -3, userInfo: [
+                    NSLocalizedDescriptionKey: "Update response missing changeKey; refusing to mark synced"
+                ])
+            }
+            guard let content = (json["body"] as? [String: Any])?["content"] as? String else {
+                note.syncStatus = .error
+                throw NSError(domain: "SyncEngine", code: -3, userInfo: [
+                    NSLocalizedDescriptionKey: "Update response missing body; refusing to mark synced"
+                ])
+            }
+            let expected = NoteConverter.extractPlainText(from: uploadedHTML)
+            let actual = NoteConverter.extractPlainText(from: content)
+            if expected != actual {
+                note.syncStatus = .error
+                throw NSError(domain: "SyncEngine", code: -3, userInfo: [
+                    NSLocalizedDescriptionKey: "Server did not persist note body"
+                ])
+            }
+            note.changeKey = newChangeKey
+            if let newId = json["id"] as? String, !newId.isEmpty {
+                note.remoteId = newId
+            }
+        }
+
+        note.syncStatus = .synced
+        note.lastSyncedAt = Date()
     }
 
     // MARK: - Debounced Push
@@ -404,13 +506,17 @@ final class SyncEngine {
             guard let note = try? modelContext.fetch(descriptor).first else { return }
 
             do {
+                self.state = .syncing
                 let token = try await authManager.getValidAccessToken()
                 try await uploadNote(note, token: token)
                 try? modelContext.save()
+                self.state = .idle
+                self.lastSyncDate = Date()
             } catch {
                 print("Debounced push error for note \(noteID): \(error)")
                 note.syncStatus = .error
                 try? modelContext.save()
+                self.state = .error(error.localizedDescription)
             }
         }
     }
@@ -466,7 +572,9 @@ final class SyncEngine {
     }
 
     private func performRemoteDelete(remoteId: String, token: String, retryAuthOnFailure: Bool = true) async throws {
-        guard let url = URL(string: "\(graphEndpoint)/me/messages/\(remoteId)") else { return }
+        guard let url = graphItemURL(collection: "me/messages", id: remoteId) else {
+            throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid delete URL"])
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -496,7 +604,17 @@ final class SyncEngine {
         pendingRemoteDeletes.remove(remoteId)
     }
 
+    // MARK: - Graph URL Helpers
+
+    private func graphItemURL(collection: String, id: String) -> URL? {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: allowed) ?? id
+        return URL(string: "\(graphEndpoint)/\(collection)/\(encoded)")
+    }
+
     // MARK: - Date Formatting Helper
+
 
     private static let isoFormatterFractional: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
