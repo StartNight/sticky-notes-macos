@@ -79,7 +79,7 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(req.url.absoluteString, "https://graph.microsoft.com/v1.0/me/notes/R-9")
         XCTAssertEqual(note.changeKey, "CK-NEW")
         XCTAssertEqual(note.syncStatus, .synced)
-        XCTAssertEqual(((bodyJSON(req)?["singleValueExtendedProperties"] as? [[String: Any]])?.first?["value"] as? String), "0")
+        XCTAssertEqual(((bodyJSON(req)?["singleValueExtendedProperties"] as? [[String: Any]])?.first?["value"] as? String), "4", "blue -> official color code 4")
     }
 
     func testEmptyNoteUploadUsesNewNoteSubject() async throws {
@@ -330,11 +330,11 @@ final class SyncEngineTests: XCTestCase {
         ctx.insert(local)
         try ctx.save()
         MockURLProtocol.handler = { req in
-            .http(status: 200, json: ["value": [self.message(id: "R-COL", changeKey: "K2", html: "<div>same</div>", color: 0)]])
+            .http(status: 200, json: ["value": [self.message(id: "R-COL", changeKey: "K2", html: "<div>same</div>", color: 4)]])
         }
         await SyncEngine().syncAll(modelContext: ctx)
         XCTAssertEqual(local.changeKey, "K2")
-        XCTAssertEqual(local.noteColor, .blue, "云端改为蓝色(0)，本地仍为 \(local.noteColor)")
+        XCTAssertEqual(local.noteColor, .blue, "云端改为蓝色(4)，本地仍为 \(local.noteColor)")
     }
 
     /// 删除后若远端删除失败（断网），下次拉取不应“复活”已删除便签。

@@ -46,7 +46,7 @@ final class StickyNote {
     }
 
     var noteColor: NoteColor {
-        get { NoteColor(rawValue: colorRawValue) ?? .yellow }
+        get { NoteColor.fromPersisted(colorRawValue) }
         set { colorRawValue = newValue.rawValue }
     }
 

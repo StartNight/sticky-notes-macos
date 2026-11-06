@@ -126,33 +126,38 @@ struct NoteConverter {
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    // MARK: - Color Mapping for Microsoft Sticky Notes (PidLidNoteColor)
-    // 0 = Blue, 1 = Green, 2 = Pink, 3 = Yellow, 4 = White/Gray
+    // MARK: - Color Mapping for official Microsoft Sticky Notes
+    //
+    // Classic Outlook desktop PidLidNoteColor (MS-OXONOTE 0x8B00) only
+    // documents 0=Blue, 1=Green, 2=Pink, 3=Yellow, 4=White. The official
+    // Sticky Notes / Outlook on the web palette is the seven-color set
+    // (Yellow, Green, Pink, Purple, Blue, Gray, Charcoal) and uses those
+    // values in picker order:
+    //   0=Yellow, 1=Green, 2=Pink, 3=Purple, 4=Blue, 5=Gray, 6=Charcoal
+    // Sync both directions against this official enum so web and this app
+    // show the same color. Do not invent extra colors such as orange.
 
     static func outlookColorCode(for noteColor: NoteColor) -> Int {
         switch noteColor {
-        case .blue: return 0
+        case .yellow: return 0
         case .green: return 1
         case .pink: return 2
-        case .yellow: return 3
-        case .gray: return 4
-        // Outlook PidLidNoteColor only documents 0-4. Use 5/6 so every local
-        // color has a stable, reversible code (purple/orange would otherwise
-        // collapse to pink/yellow).
-        case .purple: return 5
-        case .orange: return 6
+        case .purple: return 3
+        case .blue: return 4
+        case .gray: return 5
+        case .charcoal: return 6
         }
     }
 
     static func noteColor(fromOutlookCode code: Int) -> NoteColor {
         switch code {
-        case 0: return .blue
+        case 0: return .yellow
         case 1: return .green
         case 2: return .pink
-        case 3: return .yellow
-        case 4: return .gray
-        case 5: return .purple
-        case 6: return .orange
+        case 3: return .purple
+        case 4: return .blue
+        case 5: return .gray
+        case 6: return .charcoal
         default: return .yellow
         }
     }
