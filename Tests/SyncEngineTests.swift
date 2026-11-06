@@ -49,7 +49,14 @@ final class SyncEngineTests: XCTestCase {
             "subject": "s", "body": ["contentType": "html", "content": html],
             "createdDateTime": "2026-01-01T00:00:00Z", "lastModifiedDateTime": modified
         ]
-        if let color { m["singleValueExtendedProperties"] = [["id": colorPropId, "value": "\(color)"]] }
+        if let color {
+            let webColor = NoteConverter.noteColor(fromWebCode: color)
+            let lid = NoteConverter.pidLidNoteColorCode(for: webColor)
+            m["singleValueExtendedProperties"] = [
+                ["id": colorPropId, "value": "\(lid)"],
+                ["id": webNotePropId, "value": "{\"color\":\(color),\"#type.color\":\"Int32\"}"]
+            ]
+        }
         return m
     }
 
@@ -93,7 +100,7 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(note.changeKey, "CK-NEW")
         XCTAssertEqual(note.syncStatus, .synced)
         let props = try XCTUnwrap(bodyJSON(req)?["singleValueExtendedProperties"] as? [[String: Any]])
-        XCTAssertEqual(self.propValue(props, id: self.colorPropId), "4", "blue -> official color code 4")
+        XCTAssertEqual(self.propValue(props, id: self.colorPropId), "0", "blue -> PidLidNoteColor 0 (classic)")
         try self.assertWebNoteColor(props, expected: 4)
     }
 
@@ -527,7 +534,8 @@ final class SyncEngineTests: XCTestCase {
             let req = try XCTUnwrap(MockURLProtocol.requests.first)
             XCTAssertEqual(req.method, "POST")
             let props = try XCTUnwrap(self.bodyJSON(req)?["singleValueExtendedProperties"] as? [[String: Any]])
-            XCTAssertEqual(self.propValue(props, id: self.colorPropId), "\(code)")
+            let lid = NoteConverter.pidLidNoteColorCode(for: color)
+            XCTAssertEqual(self.propValue(props, id: self.colorPropId), "\(lid)", "\(color.rawValue) PidLid")
             try self.assertWebNoteColor(props, expected: code)
         }
     }

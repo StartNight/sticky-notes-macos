@@ -21,17 +21,26 @@ enum NoteColor: String, CaseIterable, Codable {
         try container.encode(rawValue)
     }
 
-    // MARK: - Color Data (official pastel swatches; charcoal is dark)
+    // MARK: - Official Microsoft Sticky Notes swatches
+    // Body / header colors sampled from the official Windows Sticky Notes
+    // app (Microsoft Store screenshots + published Windows 3.x/4.x palette:
+    // yellow body #FFF394). Outlook on the web renders the same seven named
+    // colors; we keep picker order 黄/绿/粉/紫/蓝/灰/炭笔.
+
+    /// Note body hex in light mode (sRGB), matching the official Windows app.
+    var officialLightHex: UInt { colorSet.light }
+    /// Note header/toolbar hex in light mode (sRGB).
+    var officialToolbarHex: UInt { colorSet.toolbarLight }
 
     private var colorSet: (light: UInt, dark: UInt, toolbarLight: UInt, toolbarDark: UInt) {
         switch self {
-        case .yellow:   (0xFFF2AB, 0x7B7533, 0xF2E685, 0x6B6528)
-        case .green:    (0xDFF6DD, 0x3D6B3D, 0xB7E0B4, 0x335C33)
-        case .pink:     (0xFFD9D9, 0x7B4058, 0xF0B8C4, 0x6B354B)
-        case .purple:   (0xE4D5F5, 0x5B4670, 0xC9B6E3, 0x4D3A5E)
-        case .blue:     (0xD9E8FF, 0x3B5E78, 0xB3CFF0, 0x314F65)
-        case .gray:     (0xF0F0F0, 0x555555, 0xD8D8D8, 0x474747)
-        case .charcoal: (0x3B3B3B, 0x1F1F1F, 0x4A4A4A, 0x2A2A2A)
+        case .yellow:   (0xFFF4B9, 0x6B5F1A, 0xFFEC90, 0x5A4F12)
+        case .green:    (0xBEEDB6, 0x2F5B32, 0xA8E0A0, 0x244A28)
+        case .pink:     (0xFFD7EA, 0x6B3040, 0xFFC9E4, 0x5A2734)
+        case .purple:   (0xECDAFF, 0x4E3266, 0xE0C8FA, 0x3F2754)
+        case .blue:     (0xD7EEFE, 0x2B4F66, 0xC5E4FA, 0x223F52)
+        case .gray:     (0xE9E9E9, 0x4A4A4A, 0xD0D0D0, 0x3A3A3A)
+        case .charcoal: (0x565656, 0x2A2A2A, 0x4E4E4E, 0x1F1F1F)
         }
     }
 

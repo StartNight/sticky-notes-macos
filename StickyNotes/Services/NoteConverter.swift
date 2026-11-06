@@ -128,16 +128,26 @@ struct NoteConverter {
 
     // MARK: - Color Mapping for official Microsoft Sticky Notes
     //
-    // Classic Outlook desktop PidLidNoteColor (MS-OXONOTE 0x8B00) only
-    // documents 0=Blue, 1=Green, 2=Pink, 3=Yellow, 4=White. The official
-    // Sticky Notes / Outlook on the web palette is the seven-color set
-    // (Yellow, Green, Pink, Purple, Blue, Gray, Charcoal) and uses those
-    // values in picker order:
-    //   0=Yellow, 1=Green, 2=Pink, 3=Purple, 4=Blue, 5=Gray, 6=Charcoal
-    // Sync both directions against this official enum so web and this app
-    // show the same color. Do not invent extra colors such as orange.
+    // Two independent encodings are written on every upload:
+    //
+    // 1) Modern web / Windows Sticky Notes (`_Note.color`), picker order:
+    //    0=Yellow, 1=Green, 2=Pink, 3=Purple, 4=Blue, 5=Gray, 6=Charcoal
+    //    Outlook on the web and onenote.com/stickynotes read this field
+    //    (not PidLidNoteColor). See https://stackoverflow.com/questions/67943130
+    //
+    // 2) Classic Outlook desktop PidLidNoteColor (MS-OXONOTE 0x8B00):
+    //    0=Blue, 1=Green, 2=Pink, 3=Yellow, 4=White
+    //    Purple and Charcoal have no documented classic value; they fall
+    //    back to White (4) so desktop Outlook does not show a wrong hue.
+    //
+    // Earlier builds wrote the same integer to both fields (yellow→0). That
+    // made 0x8B00 report Blue while `_Note` reported Yellow, so web/desktop
+    // clients that reconcile via 0x8B00 (or notes that never received `_Note`)
+    // displayed a different color than this app. Always write the two
+    // encodings separately, and prefer `_Note` when reading.
 
-    static func outlookColorCode(for noteColor: NoteColor) -> Int {
+    /// Modern web Sticky Notes color (`_Note.color`).
+    static func webNoteColorCode(for noteColor: NoteColor) -> Int {
         switch noteColor {
         case .yellow: return 0
         case .green: return 1
@@ -149,7 +159,7 @@ struct NoteConverter {
         }
     }
 
-    static func noteColor(fromOutlookCode code: Int) -> NoteColor {
+    static func noteColor(fromWebCode code: Int) -> NoteColor {
         switch code {
         case 0: return .yellow
         case 1: return .green
@@ -160,6 +170,39 @@ struct NoteConverter {
         case 6: return .charcoal
         default: return .yellow
         }
+    }
+
+    /// Classic Outlook desktop PidLidNoteColor (MS-OXONOTE).
+    static func pidLidNoteColorCode(for noteColor: NoteColor) -> Int {
+        switch noteColor {
+        case .blue: return 0
+        case .green: return 1
+        case .pink: return 2
+        case .yellow: return 3
+        case .gray, .purple, .charcoal: return 4
+        }
+    }
+
+    static func noteColor(fromPidLidCode code: Int) -> NoteColor {
+        switch code {
+        case 0: return .blue
+        case 1: return .green
+        case 2: return .pink
+        case 3: return .yellow
+        case 4: return .gray
+        case 5: return .gray
+        case 6: return .charcoal
+        default: return .yellow
+        }
+    }
+
+    /// Back-compat alias used by tests and older call sites: web/modern code.
+    static func outlookColorCode(for noteColor: NoteColor) -> Int {
+        webNoteColorCode(for: noteColor)
+    }
+
+    static func noteColor(fromOutlookCode code: Int) -> NoteColor {
+        noteColor(fromWebCode: code)
     }
 
     /// Classic Outlook desktop color (MS-OXONOTE PidLidNoteColor). Web Sticky Notes
@@ -224,7 +267,7 @@ struct NoteConverter {
         [
             [
                 "id": pidLidNoteColorPropertyId,
-                "value": "\(outlookColorCode(for: color))"
+                "value": "\(pidLidNoteColorCode(for: color))"
             ],
             [
                 "id": webNoteJSONPropertyId,
@@ -245,7 +288,7 @@ struct NoteConverter {
             } else if isPidLidNoteColorProperty(propId),
                       let value = prop["value"] as? String,
                       let code = Int(value) {
-                lidColor = noteColor(fromOutlookCode: code)
+                lidColor = noteColor(fromPidLidCode: code)
             }
         }
         return (webColor ?? lidColor ?? .yellow, webJSON)

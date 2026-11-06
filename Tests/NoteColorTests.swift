@@ -123,7 +123,7 @@ final class NoteColorTests: XCTestCase {
             let props = NoteConverter.graphColorExtendedProperties(for: color, existingWebNoteJSON: nil)
             XCTAssertEqual(props.count, 2)
             XCTAssertEqual(props[0]["id"] as? String, NoteConverter.pidLidNoteColorPropertyId)
-            XCTAssertEqual(props[0]["value"] as? String, "\(code)")
+            XCTAssertEqual(props[0]["value"] as? String, "\(NoteConverter.pidLidNoteColorCode(for: color))", "\(color.rawValue) PidLid")
             XCTAssertEqual(props[1]["id"] as? String, NoteConverter.webNoteJSONPropertyId)
             let json = try XCTUnwrap(props[1]["value"] as? String)
             XCTAssertEqual(NoteConverter.noteColor(fromWebNoteJSON: json), color)
@@ -132,4 +132,47 @@ final class NoteColorTests: XCTestCase {
             XCTAssertEqual(obj["color"] as? Int, code, "\(color.rawValue) 的 _Note.color")
         }
     }
+
+    func testOfficialLightHexMatchesWindowsStickyNotes() {
+        let expected: [(NoteColor, UInt)] = [
+            (.yellow, 0xFFF4B9), (.green, 0xBEEDB6), (.pink, 0xFFD7EA),
+            (.purple, 0xECDAFF), (.blue, 0xD7EEFE), (.gray, 0xE9E9E9),
+            (.charcoal, 0x565656)
+        ]
+        for (color, hex) in expected {
+            XCTAssertEqual(color.officialLightHex, hex, "\(color.rawValue) body hex")
+        }
+        XCTAssertEqual(NoteColor.yellow.officialToolbarHex, 0xFFEC90)
+        XCTAssertEqual(NoteColor.charcoal.officialToolbarHex, 0x4E4E4E)
+    }
+
+    func testPidLidClassicMappingDiffersFromWebForYellowAndBlue() {
+        XCTAssertEqual(NoteConverter.webNoteColorCode(for: .yellow), 0)
+        XCTAssertEqual(NoteConverter.pidLidNoteColorCode(for: .yellow), 3)
+        XCTAssertEqual(NoteConverter.webNoteColorCode(for: .blue), 4)
+        XCTAssertEqual(NoteConverter.pidLidNoteColorCode(for: .blue), 0)
+        XCTAssertEqual(NoteConverter.pidLidNoteColorCode(for: .green), 1)
+        XCTAssertEqual(NoteConverter.pidLidNoteColorCode(for: .pink), 2)
+        XCTAssertEqual(NoteConverter.pidLidNoteColorCode(for: .gray), 4)
+        XCTAssertEqual(NoteConverter.pidLidNoteColorCode(for: .purple), 4)
+        XCTAssertEqual(NoteConverter.pidLidNoteColorCode(for: .charcoal), 4)
+        XCTAssertEqual(NoteConverter.noteColor(fromPidLidCode: 0), .blue)
+        XCTAssertEqual(NoteConverter.noteColor(fromPidLidCode: 3), .yellow)
+        XCTAssertEqual(NoteConverter.noteColor(fromPidLidCode: 4), .gray)
+        XCTAssertEqual(NoteConverter.noteColor(fromWebCode: 0), .yellow)
+        XCTAssertEqual(NoteConverter.noteColor(fromWebCode: 4), .blue)
+    }
+
+    func testExtractFallsBackToClassicPidLidWhenWebNoteMissing() {
+        let yellowClassic: [[String: Any]] = [
+            ["id": NoteConverter.pidLidNoteColorPropertyId, "value": "3"]
+        ]
+        XCTAssertEqual(NoteConverter.extractNoteColor(fromExtendedProperties: yellowClassic).color, .yellow)
+
+        let blueClassic: [[String: Any]] = [
+            ["id": NoteConverter.pidLidNoteColorPropertyId, "value": "0"]
+        ]
+        XCTAssertEqual(NoteConverter.extractNoteColor(fromExtendedProperties: blueClassic).color, .blue)
+    }
+
 }
