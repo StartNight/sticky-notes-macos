@@ -405,4 +405,96 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(note.syncStatus, .error)
         XCTAssertEqual(MockURLProtocol.requests.count, 1, "防抖上传失败后无自动重试（仅依赖下次全量同步）")
     }
+
+    // MARK: Sort / timestamps
+
+    func testPullRequestOrdersByLastModifiedDateTimeDescending() async {
+        MockURLProtocol.handler = { _ in .http(status: 200, json: ["value": []]) }
+        await SyncEngine().syncAll(modelContext: ctx)
+        let get = try! XCTUnwrap(MockURLProtocol.requests.first)
+        XCTAssertTrue(get.url.absoluteString.contains("orderby=lastModifiedDateTime"), "拉取应按 lastModifiedDateTime 降序请求")
+    }
+
+    func testLocalCreateStaysOnTopAfterPullWithStaleRemoteTimestamp() async throws {
+        let localCreated = Date()
+        let note = StickyNote(content: "just created")
+        note.modifiedAt = localCreated
+        note.remoteId = "R-NEW"
+        note.changeKey = "CK-LOCAL"
+        note.syncStatus = .synced
+        ctx.insert(note)
+        let older = StickyNote(content: "older cloud")
+        older.remoteId = "R-OLD"
+        older.changeKey = "K-OLD"
+        older.syncStatus = .synced
+        older.modifiedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        ctx.insert(older)
+        try ctx.save()
+
+        MockURLProtocol.handler = { req in
+            .http(status: 200, json: ["value": [
+                self.message(id: "R-OLD", changeKey: "K-OLD", html: "<div>older cloud</div>", color: 3, modified: "2023-12-01T00:00:00Z"),
+                self.message(id: "R-NEW", changeKey: "CK-REMOTE", html: "<div>just created</div>", color: 3, modified: "0001-01-01T00:00:00Z")
+            ]])
+        }
+        await SyncEngine().syncAll(modelContext: ctx)
+        XCTAssertEqual(note.changeKey, "CK-REMOTE")
+        XCTAssertEqual(note.plainTextContent, "just created")
+        XCTAssertGreaterThan(note.modifiedAt, older.modifiedAt, "无效/默认的远端时间戳不得把本地新建便签沉底")
+        let ranked = StickyNote.visibleNewestFirst(try ctx.fetch(FetchDescriptor<StickyNote>()))
+        XCTAssertEqual(ranked.first?.remoteId, "R-NEW")
+    }
+
+    func testPulledNotesSortByLastModifiedDescending() async throws {
+        MockURLProtocol.handler = { req in
+            .http(status: 200, json: ["value": [
+                self.message(id: "R-OLD", changeKey: "1", html: "<div>old</div>", color: 3, modified: "2024-01-01T00:00:00Z"),
+                self.message(id: "R-MID", changeKey: "2", html: "<div>mid</div>", color: 3, modified: "2025-06-01T00:00:00Z"),
+                self.message(id: "R-NEW", changeKey: "3", html: "<div>new</div>", color: 3, modified: "2026-11-01T00:00:00Z")
+            ]])
+        }
+        await SyncEngine().syncAll(modelContext: ctx)
+        let ranked = StickyNote.visibleNewestFirst(try ctx.fetch(FetchDescriptor<StickyNote>()))
+        XCTAssertEqual(ranked.map(\.remoteId), ["R-NEW", "R-MID", "R-OLD"])
+    }
+
+    func testMailFolderFallbackSendsStickyNoteClassAndCurrentTimestamps() async throws {
+        MockURLProtocol.handler = { req in
+            switch req.httpMethod {
+            case "POST" where req.url?.absoluteString.contains("me/notes") == true && req.url?.absoluteString.contains("mailFolders") != true:
+                return .http(status: 403, json: ["error": "forbidden"])
+            case "POST":
+                return .http(status: 201, json: [
+                    "id": "R-MAIL",
+                    "changeKey": "CK-MAIL",
+                    "createdDateTime": "2026-11-06T00:00:00Z",
+                    "lastModifiedDateTime": "2026-11-06T00:00:00Z"
+                ])
+            default:
+                return .http(status: 500, json: [:])
+            }
+        }
+        let note = StickyNote(content: "fresh")
+        note.modifiedAt = Date()
+        ctx.insert(note)
+        try await SyncEngine().uploadNote(note, token: "t", retryAuthOnFailure: false)
+        XCTAssertEqual(note.syncStatus, .synced)
+        XCTAssertEqual(note.remoteId, "R-MAIL")
+        let post = try XCTUnwrap(MockURLProtocol.requests.last)
+        XCTAssertEqual(post.url.absoluteString, "https://graph.microsoft.com/v1.0/me/mailFolders/notes/messages")
+        let body = try XCTUnwrap(bodyJSON(post))
+        let props = try XCTUnwrap(body["singleValueExtendedProperties"] as? [[String: Any]])
+        XCTAssertTrue(props.contains { ($0["value"] as? String) == "IPM.StickyNote" })
+        XCTAssertNotNil(body["receivedDateTime"] as? String)
+        XCTAssertNotNil(body["sentDateTime"] as? String)
+        XCTAssertGreaterThanOrEqual(note.modifiedAt, SyncEngine.parseGraphDate("2026-11-06T00:00:00Z")!)
+    }
+
+    func testParseGraphDateAcceptsLongFractionalSecondsAndRejectsSentinel() {
+        XCTAssertNotNil(SyncEngine.parseGraphDate("2026-11-06T08:32:15.1234567Z"))
+        XCTAssertNotNil(SyncEngine.parseGraphDate("2026-11-06T08:32:15Z"))
+        XCTAssertNil(SyncEngine.plausibleGraphDate("0001-01-01T00:00:00Z"))
+        XCTAssertNil(SyncEngine.plausibleGraphDate("not-a-date"))
+        XCTAssertNotNil(SyncEngine.plausibleGraphDate("2026-01-01T00:00:00Z"))
+    }
 }

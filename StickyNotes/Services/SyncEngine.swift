@@ -103,7 +103,7 @@ final class SyncEngine {
     private func pullNotes(token: String, modelContext: ModelContext, retryAuthOnFailure: Bool = true) async throws {
         let expandClause = "singleValueExtendedProperties($filter=id eq '\(noteColorExtendedPropertyId)')"
         let encodedExpand = expandClause.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? expandClause
-        let urlString = "\(graphEndpoint)/me/mailFolders/notes/messages?$top=100&$select=id,changeKey,subject,body,createdDateTime,lastModifiedDateTime&$expand=\(encodedExpand)"
+        let urlString = "\(graphEndpoint)/me/mailFolders/notes/messages?$top=100&$orderby=lastModifiedDateTime%20desc&$select=id,changeKey,subject,body,createdDateTime,lastModifiedDateTime&$expand=\(encodedExpand)"
         guard let url = URL(string: urlString) else { return }
 
         var request = URLRequest(url: url)
@@ -153,11 +153,8 @@ final class SyncEngine {
             let htmlContent = (bodyObj?["content"] as? String) ?? ""
             let plainText = NoteConverter.extractPlainText(from: htmlContent)
 
-            let remoteModifiedDateStr = msg["lastModifiedDateTime"] as? String
-            let remoteModifiedDate = remoteModifiedDateStr.flatMap(parseDate) ?? Date()
-
-            let remoteCreatedDateStr = msg["createdDateTime"] as? String
-            let remoteCreatedDate = remoteCreatedDateStr.flatMap(parseDate) ?? Date()
+            let remoteModifiedDate = Self.plausibleGraphDate(msg["lastModifiedDateTime"] as? String)
+            let remoteCreatedDate = Self.plausibleGraphDate(msg["createdDateTime"] as? String)
 
             // Extract color if available
             var noteColor = NoteColor.yellow
@@ -199,7 +196,7 @@ final class SyncEngine {
                 if localNote.syncStatus == .pendingUpload {
                     // Conflict Resolution:
                     // If cloud is newer, preserve cloud as primary and save local as copy
-                    if remoteModifiedDate > localNote.modifiedAt {
+                    if let remoteModifiedDate, remoteModifiedDate > localNote.modifiedAt {
                         let copyNote = StickyNote(
                             color: localNote.noteColor,
                             content: localNote.plainTextContent
@@ -214,7 +211,8 @@ final class SyncEngine {
                         localNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
                         localNote.noteColor = noteColor
                         localNote.changeKey = changeKey
-                        localNote.modifiedAt = remoteModifiedDate
+                        localNote.modifiedAt = StickyNote.resolvedModifiedAt(local: localNote.modifiedAt, remote: remoteModifiedDate)
+                        if let remoteCreatedDate { localNote.createdAt = remoteCreatedDate }
                         localNote.syncStatus = .synced
                         localNote.lastSyncedAt = Date()
                     } else {
@@ -228,7 +226,8 @@ final class SyncEngine {
                     localNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
                     localNote.noteColor = noteColor
                     localNote.changeKey = changeKey
-                    localNote.modifiedAt = remoteModifiedDate
+                    localNote.modifiedAt = StickyNote.resolvedModifiedAt(local: localNote.modifiedAt, remote: remoteModifiedDate)
+                    if let remoteCreatedDate { localNote.createdAt = remoteCreatedDate }
                     localNote.syncStatus = .synced
                     localNote.lastSyncedAt = Date()
                 }
@@ -244,8 +243,8 @@ final class SyncEngine {
                 )
                 let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
                 newNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
-                newNote.createdAt = remoteCreatedDate
-                newNote.modifiedAt = remoteModifiedDate
+                newNote.createdAt = remoteCreatedDate ?? Date()
+                newNote.modifiedAt = remoteModifiedDate ?? remoteCreatedDate ?? Date()
                 modelContext.insert(newNote)
             }
         }
@@ -412,7 +411,8 @@ final class SyncEngine {
             note.syncStatus = .error
             throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid notes folder URL"])
         }
-        let (data, httpResponse) = try await sendJSON(url: url, method: "POST", token: token, body: payloadData)
+        let mailPayload = Self.mailFolderCreatePayload(from: payloadData)
+        let (data, httpResponse) = try await sendJSON(url: url, method: "POST", token: token, body: mailPayload)
         guard (200...299).contains(httpResponse.statusCode) else {
             note.syncStatus = .error
             let responseBody = String(data: data, encoding: .utf8) ?? "Unknown error"
@@ -485,8 +485,37 @@ final class SyncEngine {
             }
         }
 
+        applyGraphTimestamps(json, to: note)
         note.syncStatus = .synced
         note.lastSyncedAt = Date()
+    }
+
+    /// Mail-folder notes sort more reliably as IPM.StickyNote with current received/sent times.
+    fileprivate static func mailFolderCreatePayload(from data: Data) -> Data {
+        guard var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return data
+        }
+        var props = obj["singleValueExtendedProperties"] as? [[String: Any]] ?? []
+        let hasMessageClass = props.contains { id in
+            let raw = (id["id"] as? String) ?? ""
+            return raw.contains("0x001A") || raw.lowercased().contains("0x001a")
+        }
+        if !hasMessageClass {
+            props.append(["id": "String 0x001A", "value": "IPM.StickyNote"])
+        }
+        obj["singleValueExtendedProperties"] = props
+        let now = isoFormatterStandard.string(from: Date())
+        if obj["receivedDateTime"] == nil { obj["receivedDateTime"] = now }
+        if obj["sentDateTime"] == nil { obj["sentDateTime"] = now }
+        return (try? JSONSerialization.data(withJSONObject: obj)) ?? data
+    }
+
+    private func applyGraphTimestamps(_ json: [String: Any], to note: StickyNote) {
+        let remoteModified = Self.plausibleGraphDate(json["lastModifiedDateTime"] as? String)
+        note.modifiedAt = StickyNote.resolvedModifiedAt(local: note.modifiedAt, remote: remoteModified)
+        if let created = Self.plausibleGraphDate(json["createdDateTime"] as? String) {
+            note.createdAt = created
+        }
     }
 
     // MARK: - Debounced Push
@@ -628,8 +657,28 @@ final class SyncEngine {
         return f
     }()
 
-    private func parseDate(_ string: String) -> Date? {
-        Self.isoFormatterFractional.date(from: string) ?? Self.isoFormatterStandard.date(from: string)
+    static func parseGraphDate(_ string: String) -> Date? {
+        if let date = isoFormatterFractional.date(from: string) ?? isoFormatterStandard.date(from: string) {
+            return date
+        }
+        // Graph sometimes emits 7-digit fractional seconds that ISO8601DateFormatter rejects.
+        guard let dot = string.firstIndex(of: ".") else { return nil }
+        let prefix = string[..<dot]
+        let afterDot = string[string.index(after: dot)...]
+        let digits = afterDot.prefix(while: { $0.isNumber })
+        guard digits.count > 3 else { return nil }
+        let suffix = afterDot.dropFirst(digits.count)
+        let trimmed = "\(prefix).\(digits.prefix(3))\(suffix)"
+        return isoFormatterFractional.date(from: trimmed)
+            ?? isoFormatterStandard.date(from: "\(prefix)\(suffix)")
+    }
+
+    static func plausibleGraphDate(_ string: String?) -> Date? {
+        guard let string, let date = parseGraphDate(string) else { return nil }
+        let year2000 = Date(timeIntervalSince1970: 946_684_800)
+        let year2100 = Date(timeIntervalSince1970: 4_102_444_800)
+        guard date >= year2000, date <= year2100 else { return nil }
+        return date
     }
 }
 

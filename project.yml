@@ -56,6 +56,7 @@ targets:
       - StickyNotes/Services/SyncEngine.swift
       - StickyNotes/Services/TextEditorProxy.swift
       - StickyNotes/Utilities/ColorExtensions.swift
+      - StickyNotes/Utilities/KeychainHelper.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shenanigans.sticky-notes.tests

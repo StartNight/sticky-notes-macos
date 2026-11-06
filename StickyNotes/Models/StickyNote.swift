@@ -147,4 +147,22 @@ final class StickyNote {
         modifiedAt = Date()
         syncStatus = .pendingUpload
     }
+
+    /// List order: newest `modifiedAt` first; tombstones stay hidden.
+    static func visibleNewestFirst(_ notes: [StickyNote]) -> [StickyNote] {
+        notes
+            .filter { !$0.isDeletedLocally }
+            .sorted {
+                if $0.modifiedAt != $1.modifiedAt {
+                    return $0.modifiedAt > $1.modifiedAt
+                }
+                return $0.createdAt > $1.createdAt
+            }
+    }
+
+    /// Prefer the later stamp so a stale/default Graph timestamp cannot bury a just-created note.
+    static func resolvedModifiedAt(local: Date, remote: Date?) -> Date {
+        guard let remote else { return local }
+        return max(local, remote)
+    }
 }

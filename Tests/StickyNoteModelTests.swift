@@ -171,6 +171,27 @@ final class StickyNoteModelTests: XCTestCase {
         XCTAssertEqual(n.preview.count, 200)
     }
 
+    func testVisibleNewestFirstSortsByModifiedAtAndHidesTombstones() {
+        let older = StickyNote(content: "older")
+        let newer = StickyNote(content: "newer")
+        let tombstone = StickyNote(content: "gone")
+        older.modifiedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        newer.modifiedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        tombstone.modifiedAt = Date(timeIntervalSince1970: 1_900_000_000)
+        tombstone.isDeletedLocally = true
+        let ranked = StickyNote.visibleNewestFirst([older, newer, tombstone])
+        XCTAssertEqual(ranked.map(\.plainTextContent), ["newer", "older"])
+    }
+
+    func testResolvedModifiedAtDoesNotLetStaleRemoteBuryLocal() {
+        let local = Date(timeIntervalSince1970: 1_800_000_000)
+        let stale = Date(timeIntervalSince1970: 946_684_800)
+        XCTAssertEqual(StickyNote.resolvedModifiedAt(local: local, remote: stale), local)
+        XCTAssertEqual(StickyNote.resolvedModifiedAt(local: local, remote: nil), local)
+        let newer = Date(timeIntervalSince1970: 1_900_000_000)
+        XCTAssertEqual(StickyNote.resolvedModifiedAt(local: local, remote: newer), newer)
+    }
+
     func testSyncStatusRawValuesStable() {
         // Raw values are persisted in the store; changing them would break existing data.
         XCTAssertEqual(SyncStatus.synced.rawValue, "synced")

@@ -18,7 +18,7 @@ struct NotesListView: View {
     @AppStorage("followActiveApp") private var followActiveApp = true
 
     private var filteredNotes: [StickyNote] {
-        let visible = notes.filter { !$0.isDeletedLocally }
+        let visible = StickyNote.visibleNewestFirst(Array(notes))
         if searchText.isEmpty { return visible }
         let query = searchText.lowercased()
         return visible.filter { $0.plainTextContent.lowercased().contains(query) }
