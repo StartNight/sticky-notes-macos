@@ -605,4 +605,60 @@ final class AccountIsolationTests: XCTestCase {
         XCTAssertNotNil(c.lastError)
         XCTAssertTrue(service.ledger.decisions(for: "A").isEmpty && service.ledger.decisions(for: "B").isEmpty)
     }
+    // MARK: legacy cloud-traced copy must not duplicate in the cloud (follow-up #2)
+    func testSameLegacyNoteCannotBeCopiedTwiceIntoTheSameAccountButCanAfterTheCopyIsGone() throws {
+        let legacy = add("legacy-cloud", owner: nil, remote: "R-old"); legacy.webNoteJSON = "{}"
+        signIn("A")
+        let first = try service.copyLegacyToCurrentAccount(legacy, modelContext: context)
+        XCTAssertEqual(try all().filter { $0.ownerAccountID == "A" }.count, 1)
+        XCTAssertThrowsError(try service.copyLegacyToCurrentAccount(legacy, modelContext: context)) { error in
+            guard case IsolationError.notEligible = error else { return XCTFail("应为硬拒绝: \(error)") }
+        }
+        XCTAssertThrowsError(try service.copyLegacyToCurrentAccount(legacy, allowSimilarContent: true, modelContext: context),
+                             "‘仍然复制’也不能绕过同源重复复制的硬拒绝")
+        XCTAssertEqual(try all().filter { $0.ownerAccountID == "A" }.count, 1, "没有产生第二个副本")
+        // 另一个账号的范围是独立的
+        signIn("B")
+        XCTAssertNoThrow(try service.copyLegacyToCurrentAccount(legacy, modelContext: context))
+        // 副本被用户删除之后可以再复制
+        signIn("A")
+        first.isDeletedLocally = true; try context.save()
+        XCTAssertNoThrow(try service.copyLegacyToCurrentAccount(legacy, modelContext: context))
+        XCTAssertNil(legacy.ownerAccountID, "原件始终留在隔离区")
+    }
+
+    func testCopyIsRefusedWhenTheAccountAlreadyHoldsTheSameCloudObject() throws {
+        let legacy = add("old text", owner: nil, remote: "R-same")
+        add("pulled down from cloud", owner: "A", remote: "R-same")
+        signIn("A")
+        XCTAssertThrowsError(try service.copyLegacyToCurrentAccount(legacy, allowSimilarContent: true, modelContext: context)) { error in
+            guard case IsolationError.notEligible = error else { return XCTFail("\(error)") }
+        }
+        // a different account (which does not hold R-same) may still copy it
+        signIn("B")
+        XCTAssertNoThrow(try service.copyLegacyToCurrentAccount(legacy, modelContext: context))
+    }
+
+    func testIdenticalTextInTheAccountAsksFirstAndCopiesOnlyWhenConfirmed() throws {
+        let legacy = add("  shopping list\n", owner: nil, remote: "R-old")
+        add("shopping list", owner: "A", remote: "R-other")
+        let unrelated = add("unrelated", owner: nil, remote: "R-x")
+        signIn("A")
+        let before = try all().count
+        XCTAssertThrowsError(try service.copyLegacyToCurrentAccount(legacy, modelContext: context)) { error in
+            guard case IsolationError.duplicateRisk = error else { return XCTFail("应为需确认的软拦截: \(error)") }
+        }
+        XCTAssertEqual(try all().count, before, "未确认前不创建副本")
+        XCTAssertNoThrow(try service.copyLegacyToCurrentAccount(unrelated, modelContext: context), "内容不同无需确认")
+        let copy = try service.copyLegacyToCurrentAccount(legacy, allowSimilarContent: true, modelContext: context)
+        XCTAssertEqual(copy.ownerAccountID, "A"); XCTAssertNil(copy.remoteId)
+    }
+
+    func testCopyNeverTalksToTheCloud() async throws {
+        let legacy = add("legacy-cloud", owner: nil, remote: "R-old")
+        signIn("A")
+        MockURLProtocol.handler = { [self] in listReply($0) }
+        _ = try service.copyLegacyToCurrentAccount(legacy, modelContext: context)
+        XCTAssertTrue(MockURLProtocol.requests.isEmpty, "复制本身只改本地；上传走正常同步")
+    }
 }

@@ -3,12 +3,15 @@ import SwiftData
 
 enum IsolationError: LocalizedError {
     case notVerified, stalePrompt, notEligible(String), needsAcknowledgement
+    /// Soft block: a copy is allowed but only after the user confirms (see `allowSimilarContent`).
+    case duplicateRisk(String)
 
     var errorDescription: String? {
         switch self {
         case .notVerified: return "账号身份未确认，已暂停。"
         case .stalePrompt: return "账号或登录状态已变化，请重新确认。"
         case .notEligible(let why): return why
+        case .duplicateRisk(let why): return why
         case .needsAcknowledgement: return "导出其他账号或隔离区的本地数据需要您明确确认。"
         }
     }
@@ -35,6 +38,23 @@ struct AdoptionLedger {
     }
 }
 
+/// Which legacy (quarantined, cloud-traced) note was already copied into which account. Per account, so the same
+/// source may still be copied into a different account. Stores only UUIDs, never content or credentials.
+struct LegacyCopyLedger {
+    let defaults: UserDefaults
+    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+    private func key(_ accountID: String) -> String { "legacy_copy_ledger.v1." + accountID }
+    func copyID(of source: UUID, for accountID: String) -> UUID? {
+        guard let raw = defaults.dictionary(forKey: key(accountID)) as? [String: String] else { return nil }
+        return raw[source.uuidString].flatMap(UUID.init(uuidString:))
+    }
+    func record(source: UUID, copy: UUID, for accountID: String) {
+        var raw = (defaults.dictionary(forKey: key(accountID)) as? [String: String]) ?? [:]
+        raw[source.uuidString] = copy.uuidString
+        defaults.set(raw, forKey: key(accountID))
+    }
+}
+
 /// First-sign-in adoption of no-account notes, legacy quarantine claims, and local-only exports.
 /// Nothing here talks to Graph. Upload happens later through the normal, owner-checked sync path.
 @MainActor
@@ -50,9 +70,11 @@ final class AccountIsolationService {
 
     private let auth: any SyncAuthProviding
     let ledger: AdoptionLedger
+    let copyLedger: LegacyCopyLedger
     init(auth: any SyncAuthProviding = AuthManager.shared, ledger: AdoptionLedger = AdoptionLedger()) {
         self.auth = auth
         self.ledger = ledger
+        self.copyLedger = LegacyCopyLedger(defaults: ledger.defaults)
     }
 
     // MARK: First sign-in / re-ask rule
@@ -147,10 +169,31 @@ final class AccountIsolationService {
 
     /// For legacy notes with cloud traces: explicit copy into the current account. The original stays
     /// quarantined and untouched; the copy carries no cloud ids, so it uploads as a NEW note.
+    ///
+    /// Duplicate guards (a cloud-traced note's cloud object may already be in this account, because sync pulls every
+    /// cloud note down as an owned note):
+    ///  1. hard: this source was already copied into this account (and the copy still exists) -> refuse;
+    ///  2. hard: the account already holds a note bound to the same cloud object id -> refuse;
+    ///  3. soft: the account already holds a note with identical text -> `duplicateRisk`, allowed only with
+    ///     `allowSimilarContent: true` (the UI asks the user). Trade-off: text equality can be a coincidence or an
+    ///     edited copy, so it asks instead of silently refusing; cloud-side dedupe is impossible without writing.
     @discardableResult
-    func copyLegacyToCurrentAccount(_ note: StickyNote, modelContext: ModelContext) throws -> StickyNote {
+    func copyLegacyToCurrentAccount(_ note: StickyNote, allowSimilarContent: Bool = false, modelContext: ModelContext) throws -> StickyNote {
         guard note.ownership == .legacyUnknown, !note.isDeleted else { throw IsolationError.notEligible("该便笺不在隔离区。") }
         let id = try verifiedAccountID()
+        let all = try modelContext.fetch(FetchDescriptor<StickyNote>())
+        let mine = all.filter { $0.ownerAccountID == id && !$0.isDeleted && !$0.isDeletedLocally }
+        if let copyID = copyLedger.copyID(of: note.id, for: id), mine.contains(where: { $0.id == copyID }) {
+            throw IsolationError.notEligible("这条遗留便笺已经复制到当前账号，不能重复复制（重复复制会在云端产生重复便笺）。")
+        }
+        if let remote = note.remoteId, mine.contains(where: { $0.remoteId == remote }) {
+            throw IsolationError.notEligible("当前账号下已有绑定同一云端对象的便笺，无需再复制（复制会在云端产生重复）。")
+        }
+        let normalized = note.plainTextContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !allowSimilarContent, !normalized.isEmpty,
+           mine.contains(where: { $0.plainTextContent.trimmingCharacters(in: .whitespacesAndNewlines) == normalized }) {
+            throw IsolationError.duplicateRisk("当前账号下已有内容相同的便笺。若这条遗留便笺就是它的旧版本，再复制会在云端产生重复便笺。确定仍要复制吗？")
+        }
         let copy = StickyNote(color: note.noteColor, content: note.plainTextContent, ownerAccountID: id, syncStatus: .pendingUpload)
         copy.attributedContentData = note.attributedContentData
         copy.audioRecordings = note.audioRecordings
@@ -158,6 +201,7 @@ final class AccountIsolationService {
         copy.modifiedAt = note.modifiedAt
         modelContext.insert(copy)
         try modelContext.save()
+        copyLedger.record(source: note.id, copy: copy.id, for: id)
         return copy
     }
 }

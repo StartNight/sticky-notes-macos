@@ -22,6 +22,8 @@ struct LocalDataSettingsView: View {
     @State private var showExporter = false
     @State private var pendingExport: (notes: [StickyNote], label: String)?
     @State private var confirmOutOfScopeExport = false
+    @State private var duplicateCopyCandidate: StickyNote?
+    @State private var duplicateCopyMessage = ""
     private let service = AccountIsolationService.shared
     @State private var legacyKeychainStep = 0   // 0 idle, 1 first confirmation, 2 final confirmation
 
@@ -71,9 +73,7 @@ struct LocalDataSettingsView: View {
                                 Text(String(localized: "Has cloud traces — owner could be any account. Copy keeps this original untouched."))
                                     .font(.caption2).foregroundStyle(.orange)
                                 if scope.accountID != nil {
-                                    Button(String(localized: "Copy to current account as new note")) {
-                                        run { _ = try service.copyLegacyToCurrentAccount(note, modelContext: modelContext) }
-                                    }
+                                    Button(String(localized: "Copy to current account as new note")) { copyLegacy(note, allowSimilarContent: false) }
                                 }
                             } else {
                                 HStack {
@@ -132,6 +132,15 @@ struct LocalDataSettingsView: View {
         } message: {
             Text(String(localized: "This cannot be undone."))
         }
+        .alert(String(localized: "Possible duplicate"), isPresented: Binding(get: { duplicateCopyCandidate != nil }, set: { if !$0 { duplicateCopyCandidate = nil } })) {
+            Button(String(localized: "Cancel"), role: .cancel) { duplicateCopyCandidate = nil }
+            Button(String(localized: "Copy Anyway")) {
+                if let note = duplicateCopyCandidate { copyLegacy(note, allowSimilarContent: true) }
+                duplicateCopyCandidate = nil
+            }
+        } message: {
+            Text(duplicateCopyMessage)
+        }
         .formStyle(.grouped)
         .padding(8)
         .alert(String(localized: "Export data outside the current scope?"), isPresented: $confirmOutOfScopeExport) {
@@ -163,6 +172,17 @@ struct LocalDataSettingsView: View {
         let tail = String(owner.suffix(4))
         let number = String(count)
         return String(localized: "Account …\(tail): \(number) note(s)")
+    }
+
+    /// Hard duplicates are refused with a message; a probable duplicate asks for explicit confirmation first.
+    private func copyLegacy(_ note: StickyNote, allowSimilarContent: Bool) {
+        do {
+            _ = try service.copyLegacyToCurrentAccount(note, allowSimilarContent: allowSimilarContent, modelContext: modelContext)
+            message = nil
+        } catch IsolationError.duplicateRisk(let why) {
+            duplicateCopyCandidate = note
+            duplicateCopyMessage = why
+        } catch { message = error.localizedDescription }
     }
 
     private func run(_ action: () throws -> Void) {
