@@ -280,7 +280,8 @@ final class SyncLifecycleTests: XCTestCase {
         }
         await engine.syncAll(modelContext: context)
         assertError(engine)
-        XCTAssertTrue(MockURLProtocol.requests.isEmpty)
+        // Per-record isolation: pull may run, but the damaged record is never uploaded/deleted/overwritten.
+        XCTAssertTrue(MockURLProtocol.requests.allSatisfy { $0.method == "GET" })
         XCTAssertEqual(local.pendingCleanupIDsData, Data("not-valid-json".utf8))
     }
 

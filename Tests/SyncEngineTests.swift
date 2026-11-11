@@ -704,23 +704,6 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertNil(note.remoteId)
     }
 
-    func testUnownedLocalNotesRequireExplicitAdoptionAndLegacyRemoteLinksRemainUntouched() throws {
-        let local = StickyNote(content: "offline")
-        let legacy = StickyNote(content: "legacy", remoteId: "old-id")
-        legacy.webNoteJSON = "legacy-document"
-        let a = StickyNote(content: "A", ownerAccountID: "A")
-        ctx.insert(local); ctx.insert(legacy); ctx.insert(a)
-        let adopted = try SyncEngine(authManager: SyncAuthStub.shared).adoptLocalOnlyNotes(modelContext: ctx)
-        XCTAssertEqual(adopted, 1)
-        XCTAssertEqual(local.ownerAccountID, "test-account")
-        XCTAssertNil(local.remoteId)
-        XCTAssertNil(legacy.ownerAccountID)
-        XCTAssertEqual(legacy.remoteId, "old-id")
-        XCTAssertEqual(legacy.webNoteJSON, "legacy-document")
-        XCTAssertEqual(a.ownerAccountID, "A")
-        XCTAssertTrue(MockURLProtocol.requests.isEmpty)
-    }
-
     func testLastSyncTimestampIsAccountScoped() {
         let engine = SyncEngine(authManager: SyncAuthStub.shared)
         SyncAuthStub.shared.accountID = UUID().uuidString

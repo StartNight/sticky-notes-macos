@@ -143,6 +143,13 @@ struct RecoveryReviewView: View {
             }
             Button(String(localized: "Explicitly create a new remote copy (duplicate risk)…")) { request(.retryCreate, note: note) }
                 .disabled(note.recoveryPendingDeleteID != nil || (note.pendingCreateOperationID == nil && !note.recoveryPaused && note.syncStatus == .synced))
+            if note.recoveryBlocksAutomaticRecreate {
+                Button(String(localized: "Allow replacement sync for this note (local setting)")) {
+                    run { try engine.allowReplacementSync(note, reason: reason, acknowledged: acknowledged) }
+                }
+                Text(String(localized: "If updates to the linked object keep failing (for example without ShortNotes permission), this lets the normal create-then-delete replacement run for this note. No Microsoft write happens now."))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Text(String(localized: "Association preserves local snapshots and archives other local representations without deleting cloud objects. Recreate can leave duplicates. Never infer absence from the first page or text similarity."))
                 .font(.caption).foregroundStyle(.secondary)
         }.disabled(busy || !acknowledged || reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

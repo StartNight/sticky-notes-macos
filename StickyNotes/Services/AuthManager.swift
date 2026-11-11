@@ -6,11 +6,22 @@ import SwiftUI
 @MainActor
 protocol SyncAuthProviding: AnyObject {
     var isAuthenticated: Bool { get }
+    var isAuthenticating: Bool { get }
+    var isRestoringSession: Bool { get }
     var accountID: String? { get }
     var sessionGeneration: UUID { get }
     func getValidAccessToken() async throws -> String
     func refreshTokens() async throws -> String
     func ensureAccountID() async throws -> String
+}
+
+extension SyncAuthProviding {
+    var isAuthenticating: Bool { false }
+    var isRestoringSession: Bool { false }
+    /// What local data may be shown/edited/synced right now. Derived only from verified identity.
+    var activeScope: ActiveScope {
+        ActiveScope.resolve(isAuthenticated: isAuthenticated, isAuthenticating: isAuthenticating || isRestoringSession, accountID: accountID)
+    }
 }
 
 @MainActor
@@ -24,6 +35,19 @@ final class AuthManager: NSObject, SyncAuthProviding {
     var userEmail: String? = nil
     var isAuthenticating: Bool = false
     var lastAuthError: String? = nil
+
+    /// Startup keychain restore. While it is `.loading`/`.needsConsent` the identity is unconfirmed, so the
+    /// active scope is `.blocked` (no account data shown). It never blocks the main thread.
+    enum RestoreState: Equatable {
+        case idle, loading, needsConsent, done
+        case denied(Int32)
+        case failed(Int32)
+    }
+    private(set) var restoreState: RestoreState = .idle
+    var isRestoringSession: Bool { restoreState == .loading || restoreState == .needsConsent }
+    var needsKeychainExplanation: Bool { restoreState == .needsConsent }
+    private(set) var restoreTask: Task<Void, Never>?
+    private(set) var keychainWork: Task<Void, Never>?
 
     // MARK: - Configuration
     var clientId: String {
@@ -77,12 +101,63 @@ final class AuthManager: NSObject, SyncAuthProviding {
         self.defaults = defaults
         self.network = network
         super.init()
-        if loadStoredAuth { checkStoredAuth() }
+        if loadStoredAuth { beginRestore() }
     }
 
-    func checkStoredAuth() {
+    // MARK: - Startup restore (background keychain read)
+
+    func beginRestore() {
         NSLog("AUTH_FLOW phase=restore")
-        guard !defaults.bool(forKey: "ms_explicitly_signed_out") else { return }
+        guard !defaults.bool(forKey: "ms_explicitly_signed_out") else { restoreState = .done; return }
+        if keychain.isHydrated { applyStoredAuth(); restoreState = .done; return } // memory only, no I/O
+        restoreState = .loading
+        let generation = sessionGeneration
+        restoreTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await self.keychain.probeNonInteractiveAsync()
+            self.finishRestore(result, generation: generation)
+        }
+    }
+
+    /// The in-app explanation was acknowledged: the one allowed interactive read for this launch.
+    func confirmKeychainAccess() async {
+        guard restoreState == .needsConsent else { return }
+        restoreState = .loading
+        let generation = sessionGeneration
+        let result = await keychain.readInteractiveAsync()
+        finishRestore(result, generation: generation)
+    }
+
+    /// The user declined: no read this launch, nothing deleted or recreated.
+    func declineKeychainAccess() {
+        guard restoreState == .needsConsent else { return }
+        keychain.declineInteractiveRead()
+        restoreState = .denied(Int32(errSecUserCanceled))
+        lastAuthError = "已取消钥匙串授权；本次启动不再重试，未改动任何钥匙串项或便笺。可重新登录，或重启 App 后授权。"
+    }
+
+    func waitForRestore() async { await restoreTask?.value }
+    func waitForKeychainWork() async { await keychainWork?.value }
+
+    private func finishRestore(_ result: KeychainProbe, generation: UUID) {
+        guard sessionGeneration == generation else { return } // signed out / signed in meanwhile
+        switch result {
+        case .success, .notFound:
+            applyStoredAuth()
+            restoreState = .done
+            if isAuthenticated { NotificationCenter.default.post(name: .requestModelContextSync, object: nil) }
+        case .needsInteraction:
+            restoreState = .needsConsent
+        case .denied(let status):
+            restoreState = .denied(status)
+            lastAuthError = "钥匙串授权被拒绝或取消（状态 \(status)）；本次启动不再重试，未改动任何钥匙串项或便笺。"
+        case .failed(let status):
+            restoreState = .failed(status)
+            lastAuthError = "无法读取钥匙串（状态 \(status)）；本次启动不再重试，未改动任何钥匙串项或便笺。"
+        }
+    }
+
+    private func applyStoredAuth() {
         if let token = keychain.readString(key: kAccessToken), !token.isEmpty {
             isAuthenticated = true
             userEmail = keychain.readString(key: kUserEmail)
@@ -232,7 +307,9 @@ final class AuthManager: NSObject, SyncAuthProviding {
                       kAccountID: "", kUserEmail: "", kUserName: ""]
         let seconds = (json["expires_in"] as? Double) ?? 3600
         values[kTokenExpiry] = String(Date().addingTimeInterval(seconds).timeIntervalSince1970)
-        guard keychain.replaceSession(strings: values) else {
+        let saved = await keychain.replaceSessionAsync(strings: values)
+        try requireGeneration(generation)
+        guard saved else {
             throw NSError(domain: "AuthManager", code: -13, userInfo: [NSLocalizedDescriptionKey: "无法保存登录会话，请检查钥匙串授权。"])
         }
 
@@ -328,7 +405,9 @@ final class AuthManager: NSObject, SyncAuthProviding {
         if let refresh = json["refresh_token"] as? String { values[kRefreshToken] = refresh }
         let seconds = (json["expires_in"] as? Double) ?? 3600
         values[kTokenExpiry] = String(Date().addingTimeInterval(seconds).timeIntervalSince1970)
-        guard keychain.update(strings: values) else {
+        let saved = await keychain.updateAsync(strings: values)
+        try requireGeneration(generation)
+        guard saved else {
             throw NSError(domain: "AuthManager", code: -13, userInfo: [NSLocalizedDescriptionKey: "无法保存刷新会话，请检查钥匙串授权。"])
         }
 
@@ -370,7 +449,9 @@ final class AuthManager: NSObject, SyncAuthProviding {
         }
         let name = json["displayName"] as? String ?? ""
         let email = (json["mail"] as? String) ?? (json["userPrincipalName"] as? String) ?? ""
-        guard keychain.update(strings: [kAccountID: id, kUserName: name, kUserEmail: email]) else {
+        let saved = await keychain.updateAsync(strings: [kAccountID: id, kUserName: name, kUserEmail: email])
+        try requireGeneration(generation)
+        guard saved else {
             throw NSError(domain: "AuthManager", code: -13, userInfo: [NSLocalizedDescriptionKey: "无法保存账号身份，已暂停同步。"])
         }
         accountID = id
@@ -401,7 +482,17 @@ final class AuthManager: NSObject, SyncAuthProviding {
     func signOut() {
         NSLog("AUTH_FLOW phase=logout")
         invalidateSession()
-        lastAuthError = keychain.clearAll() ? nil : "本地已退出，但钥匙串清理未完成；重开不会自动恢复登录。"
+        // Memory first (instant, no SecItem): the session is gone and queued refresh writes are voided.
+        keychain.discardCache()
+        restoreTask?.cancel()
+        restoreState = .done
+        lastAuthError = nil
+        // Then remove ONLY the current session item, in the background. Other items are not touched.
+        keychainWork = Task { [weak self] in
+            guard let self else { return }
+            let ok = await self.keychain.clearAllAsync()
+            if !ok { self.lastAuthError = "本地已退出，但钥匙串清理未完成；重开不会自动恢复登录。" }
+        }
     }
 
     private static let formAllowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))

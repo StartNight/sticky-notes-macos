@@ -22,9 +22,10 @@ struct NoteWindowView: View {
     /// Returns nil once the note has been deleted so callers can't read
     /// properties off a tombstoned model (which would crash).
     private var liveNote: StickyNote? {
-        guard let note, !note.isDeleted else { return nil }
+        guard let note, !note.isDeleted, note.isVisible(in: AuthManager.shared.activeScope) else { return nil }
         return note
     }
+    @State private var loaded = false
 
     var body: some View {
         Group {
@@ -52,10 +53,6 @@ struct NoteWindowView: View {
                     if note.pendingCreateOperationID != nil {
                         Text(String(localized: "Creation result needs verification — automatic retry blocked"))
                             .font(.caption2).foregroundStyle(.orange)
-                    }
-                    if note.ownerAccountID == nil || note.ownerAccountID != AuthManager.shared.accountID {
-                        Text(String(localized: "Not linked to current account — kept locally"))
-                            .font(.caption2).foregroundStyle(.secondary).padding(4)
                     }
 
                     NoteTextEditor(
@@ -98,6 +95,9 @@ struct NoteWindowView: View {
             } else {
                 Text(String(localized: "Note not found"))
                     .frame(width: 300, height: 200)
+                    // Out-of-scope (other account / signed out / identity unconfirmed) or deleted: close the window.
+                    // `isOpen` is deliberately untouched so the window returns when its scope is active again.
+                    .background(loaded ? AnyView(ScopeWindowCloser { windowManager.markClosed(noteID) }) : AnyView(EmptyView()))
             }
         }
         .alert(String(localized: "Delete Note?"), isPresented: $showDeleteConfirmation) {
@@ -116,7 +116,9 @@ struct NoteWindowView: View {
         let descriptor = FetchDescriptor<StickyNote>(
             predicate: #Predicate { $0.id == id }
         )
-        guard let found = try? modelContext.fetch(descriptor).first else { return }
+        defer { loaded = true }
+        guard let found = try? modelContext.fetch(descriptor).first,
+              found.isVisible(in: AuthManager.shared.activeScope) else { return }
         self.note = found
 
         if let data = found.attributedContentData {
@@ -218,11 +220,11 @@ struct NoteWindowView: View {
 
     private func createNote() {
         let color = NoteColor.allCases.randomElement() ?? .yellow
-        let newNote = StickyNote(color: color, ownerAccountID: AuthManager.shared.accountID)
+        guard let newNote = StickyNote.make(in: AuthManager.shared.activeScope, color: color) else { NSSound.beep(); return }
         modelContext.insert(newNote)
         try? modelContext.save()
         openWindow(value: newNote.id)
-        if AuthManager.shared.isAuthenticated {
+        if AuthManager.shared.activeScope.accountID != nil {
             SyncEngine.shared.scheduleDebouncedPush(for: newNote.id, in: modelContext)
         }
     }

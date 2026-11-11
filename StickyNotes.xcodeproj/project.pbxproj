@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0B7C6C5DC2A1CF6261B12919 /* AudioClipView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F95B31B727D6F6185EC084A4 /* AudioClipView.swift */; };
+		0E1A92784FD6101749665D29 /* AccountScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCE438680CA11A8271320CB7 /* AccountScope.swift */; };
 		1613E870E5B0AD0AA6B25F71 /* ActiveWindowTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2162122D48048E4E42BB620 /* ActiveWindowTracker.swift */; };
 		184EE3D5AE8398F2EEBD7247 /* TextEditorProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C430675DDF145051A7C5A15 /* TextEditorProxy.swift */; };
 		1B0611F2DD666C3F1E806500 /* DurationFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30F40E07E43105C8EAC7BB02 /* DurationFormatting.swift */; };
@@ -24,6 +25,7 @@
 		519E1A385DC6C1916D87879E /* NoteColorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BCAE7EFA1C2253248CAF8D2 /* NoteColorTests.swift */; };
 		52327F5608CB3B48680DB018 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = E03440D2E98E2EB7FA1E3381 /* Localizable.xcstrings */; };
 		53123875221DDF8CCEA1605D /* ColorExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2297900470B900CA99A1EE23 /* ColorExtensions.swift */; };
+		5340875C0181964EA3AEFE20 /* AccountScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCE438680CA11A8271320CB7 /* AccountScope.swift */; };
 		550F496734439B63A09B88EF /* ColorExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2297900470B900CA99A1EE23 /* ColorExtensions.swift */; };
 		56E19520CB23415AE02DE919 /* NoteEditorPasteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4830B1D85A26E9B524E3F8C7 /* NoteEditorPasteTests.swift */; };
 		5D907629A3BC0FC122D52553 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1160D0223842AEC1A73B5D /* AuthManager.swift */; };
@@ -36,6 +38,7 @@
 		733E020D3F886A45FF890F45 /* WindowAccessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEF7E171627D81943B9AF5E1 /* WindowAccessor.swift */; };
 		763F8917DE678E36068076BC /* AccountMigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FC42E3045208E8D471AC698 /* AccountMigrationTests.swift */; };
 		781A7540948F3A825147FBE4 /* SyncRecoveryTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7ACC13492BAC756DF06FD1 /* SyncRecoveryTypes.swift */; };
+		7AAB65D5EAEF3F024E523E04 /* AccountIsolationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 408CA56B65282C21A0846B71 /* AccountIsolationTests.swift */; };
 		7B1C9F74131BE16823097672 /* SyncRecoveryTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7ACC13492BAC756DF06FD1 /* SyncRecoveryTypes.swift */; };
 		7B5A35F39F2C3202EE6CFBD6 /* NoteColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC75B15DB7993FBDBF019F5C /* NoteColor.swift */; };
 		7CE0B7E1CB97A13B9080ADA6 /* NoteConverter.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC64E0327C1C6DD99B7D8A27 /* NoteConverter.swift */; };
@@ -45,6 +48,7 @@
 		8A85486AD7F26E757029E4E4 /* RecoveryWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 035CB8DAB33F83137FC5D3ED /* RecoveryWorkflowTests.swift */; };
 		8DDC802A43650C3F8D2F9A32 /* NoteConverterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76201D35267BB20671F1A2B0 /* NoteConverterTests.swift */; };
 		9297786BBF8828017F51638D /* AuthManagerStub.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBEE93EADE345D094471921E /* AuthManagerStub.swift */; };
+		996114F37564046316EAD562 /* AccountIsolationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09AEED4C0DC39B1AF58DCA29 /* AccountIsolationService.swift */; };
 		9D79F23ACC031929FB318A9C /* SearchBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52D260DC782A81409FDFA6CA /* SearchBar.swift */; };
 		9D9B6F518E852E952AE46688 /* NoteToolbarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4723B0D0D563B40BF0AD7211 /* NoteToolbarView.swift */; };
 		9EB6DECB906FCAE9D2181AD6 /* StickyNotesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA8553FD88D4A235710062D6 /* StickyNotesApp.swift */; };
@@ -56,11 +60,13 @@
 		C2DB3D4BD76A9D3931B58DB4 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 330DBE45BB9D76027DFFCD95 /* Assets.xcassets */; };
 		C5F5AFD2B4CEF7F365C2304B /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D4BAD512EEAEF4442394B01 /* SettingsView.swift */; };
 		C7E92EC7346610FB86681445 /* FormattingBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7217EF20296DFC6B0BC4020 /* FormattingBar.swift */; };
+		D06FB348E7DF81FEFB0EBD45 /* LocalDataSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1804D0BAA056DFE921D8B655 /* LocalDataSettingsView.swift */; };
 		D60D810A51DE1054F08D098C /* TextEditorProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C430675DDF145051A7C5A15 /* TextEditorProxy.swift */; };
 		D796567F41C6AC712BE69AEF /* SyncEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99EB2DAAA32B0B1722721AE5 /* SyncEngine.swift */; };
 		D8EB2F04D85F640DB8EAAAD8 /* StickyNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8826B7F98B8949FE9E61E5A /* StickyNote.swift */; };
 		EE39C834FAC44661CE98B961 /* SyncLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF700D3EC8736E43B53FA39F /* SyncLifecycleTests.swift */; };
 		F6DFDE2465418B0865C9ED90 /* NoteConverter.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC64E0327C1C6DD99B7D8A27 /* NoteConverter.swift */; };
+		FA4EB07212DEC4B07C3FCFD2 /* AccountIsolationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09AEED4C0DC39B1AF58DCA29 /* AccountIsolationService.swift */; };
 		FD4F353C40F7EE25B249CEDD /* SpeechRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C0ECA073AFAF251A3B94B45 /* SpeechRecognizer.swift */; };
 		FFAF6B8F1A44E2FC6BB96864 /* StickyNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8826B7F98B8949FE9E61E5A /* StickyNote.swift */; };
 /* End PBXBuildFile section */
@@ -68,7 +74,9 @@
 /* Begin PBXFileReference section */
 		035CB8DAB33F83137FC5D3ED /* RecoveryWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryWorkflowTests.swift; sourceTree = "<group>"; };
 		0452B406919C274FD81269F9 /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
+		09AEED4C0DC39B1AF58DCA29 /* AccountIsolationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountIsolationService.swift; sourceTree = "<group>"; };
 		0C0ECA073AFAF251A3B94B45 /* SpeechRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechRecognizer.swift; sourceTree = "<group>"; };
+		1804D0BAA056DFE921D8B655 /* LocalDataSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalDataSettingsView.swift; sourceTree = "<group>"; };
 		1C430675DDF145051A7C5A15 /* TextEditorProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextEditorProxy.swift; sourceTree = "<group>"; };
 		22253EDED58982293A39106F /* DateFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DateFormatting.swift; sourceTree = "<group>"; };
 		2297900470B900CA99A1EE23 /* ColorExtensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorExtensions.swift; sourceTree = "<group>"; };
@@ -76,6 +84,7 @@
 		30F40E07E43105C8EAC7BB02 /* DurationFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DurationFormatting.swift; sourceTree = "<group>"; };
 		330DBE45BB9D76027DFFCD95 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		3898B713A09EBE943EB5257E /* FakeKeychainBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FakeKeychainBackend.swift; sourceTree = "<group>"; };
+		408CA56B65282C21A0846B71 /* AccountIsolationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountIsolationTests.swift; sourceTree = "<group>"; };
 		4723B0D0D563B40BF0AD7211 /* NoteToolbarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteToolbarView.swift; sourceTree = "<group>"; };
 		4830B1D85A26E9B524E3F8C7 /* NoteEditorPasteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteEditorPasteTests.swift; sourceTree = "<group>"; };
 		48F7FAD50DF90DD24DBFF35A /* StickyNotes.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StickyNotes.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -114,6 +123,7 @@
 		EE586DF508DB92410B58BAD5 /* NoteWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteWindowView.swift; sourceTree = "<group>"; };
 		F4B0246E19DA367FD032A382 /* LocalizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizationTests.swift; sourceTree = "<group>"; };
 		F95B31B727D6F6185EC084A4 /* AudioClipView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioClipView.swift; sourceTree = "<group>"; };
+		FCE438680CA11A8271320CB7 /* AccountScope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountScope.swift; sourceTree = "<group>"; };
 		FEF7E171627D81943B9AF5E1 /* WindowAccessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowAccessor.swift; sourceTree = "<group>"; };
 		FFA10ED573A90AB22C21C27D /* NotesListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotesListView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -165,6 +175,7 @@
 		507C38355EABEFD12AA6F193 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				1804D0BAA056DFE921D8B655 /* LocalDataSettingsView.swift */,
 				E88AFFB69144B3927F91AE6C /* RecoveryReviewView.swift */,
 				6D4BAD512EEAEF4442394B01 /* SettingsView.swift */,
 				FEF7E171627D81943B9AF5E1 /* WindowAccessor.swift */,
@@ -175,6 +186,7 @@
 		661C1E3BD922FF84D971E4F4 /* Tests */ = {
 			isa = PBXGroup;
 			children = (
+				408CA56B65282C21A0846B71 /* AccountIsolationTests.swift */,
 				6FC42E3045208E8D471AC698 /* AccountMigrationTests.swift */,
 				D64B4B5262F2E21AD8BD436E /* AuthManagerTests.swift */,
 				E9BA370A56E35BAFA9D72BA5 /* KeychainHelperTests.swift */,
@@ -248,6 +260,7 @@
 		B41D03763070720E7E44AE4E /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				FCE438680CA11A8271320CB7 /* AccountScope.swift */,
 				AC75B15DB7993FBDBF019F5C /* NoteColor.swift */,
 				D8826B7F98B8949FE9E61E5A /* StickyNote.swift */,
 			);
@@ -257,6 +270,7 @@
 		D753CBDB6AA2F149F82A6F7A /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				09AEED4C0DC39B1AF58DCA29 /* AccountIsolationService.swift */,
 				D2162122D48048E4E42BB620 /* ActiveWindowTracker.swift */,
 				BE343E8B78ABF1CA38745D9C /* AudioRecorder.swift */,
 				AB1160D0223842AEC1A73B5D /* AuthManager.swift */,
@@ -366,7 +380,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FA4EB07212DEC4B07C3FCFD2 /* AccountIsolationService.swift in Sources */,
+				7AAB65D5EAEF3F024E523E04 /* AccountIsolationTests.swift in Sources */,
 				763F8917DE678E36068076BC /* AccountMigrationTests.swift in Sources */,
+				5340875C0181964EA3AEFE20 /* AccountScope.swift in Sources */,
 				5D907629A3BC0FC122D52553 /* AuthManager.swift in Sources */,
 				9297786BBF8828017F51638D /* AuthManagerStub.swift in Sources */,
 				3EF9553AC8C87DF2A7C59D4F /* AuthManagerTests.swift in Sources */,
@@ -398,6 +415,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				996114F37564046316EAD562 /* AccountIsolationService.swift in Sources */,
+				0E1A92784FD6101749665D29 /* AccountScope.swift in Sources */,
 				1613E870E5B0AD0AA6B25F71 /* ActiveWindowTracker.swift in Sources */,
 				0B7C6C5DC2A1CF6261B12919 /* AudioClipView.swift in Sources */,
 				22D4EA9CD3503AD33D946692 /* AudioRecorder.swift in Sources */,
@@ -408,6 +427,7 @@
 				1B0611F2DD666C3F1E806500 /* DurationFormatting.swift in Sources */,
 				C7E92EC7346610FB86681445 /* FormattingBar.swift in Sources */,
 				25A96F199F4E311C9E57D789 /* KeychainHelper.swift in Sources */,
+				D06FB348E7DF81FEFB0EBD45 /* LocalDataSettingsView.swift in Sources */,
 				7D3F027AF4546422847A0E24 /* NoteCardView.swift in Sources */,
 				7B5A35F39F2C3202EE6CFBD6 /* NoteColor.swift in Sources */,
 				7CE0B7E1CB97A13B9080ADA6 /* NoteConverter.swift in Sources */,
@@ -439,6 +459,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = StickyNotes/StickyNotes.entitlements;
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;

@@ -12,9 +12,7 @@ struct SettingsView: View {
     @State private var isSigningIn = false
     @State private var errorMessage: String? = nil
     @State private var isSyncing = false
-    @State private var confirmLocalUpload = false
     @State private var showRecovery = false
-    @State private var adoptionAccountID: String?
 
     var body: some View {
         TabView {
@@ -27,8 +25,13 @@ struct SettingsView: View {
                 .tabItem {
                     Label(String(localized: "Microsoft Account"), systemImage: "arrow.triangle.2.circlepath")
                 }
+
+            LocalDataSettingsView()
+                .tabItem {
+                    Label(String(localized: "Local Data"), systemImage: "externaldrive")
+                }
         }
-        .frame(width: 450, height: 340)
+        .frame(width: 520, height: 460)
         .sheet(isPresented: $showRecovery) { RecoveryReviewView().modelContainer(modelContext.container) }
     }
 
@@ -93,24 +96,8 @@ struct SettingsView: View {
                 Section(String(localized: "Synchronization")) {
                     Button(String(localized: "Recovery review (including deleted notes)")) { showRecovery = true }
                         .disabled(authManager.accountID == nil)
-                    Text(String(localized: "Notes from other accounts and legacy unowned notes remain local and are not uploaded to this account."))
+                    Text(String(localized: "Notes from other accounts, no-account notes and legacy unowned notes are hidden here and never uploaded to this account. Manage them under Local Data."))
                         .font(.caption).foregroundStyle(.secondary)
-                    Button(String(localized: "Upload unowned local-only notes to this account")) {
-                        adoptionAccountID = authManager.accountID
-                        confirmLocalUpload = true
-                    }
-                    .disabled(authManager.accountID == nil)
-                    .confirmationDialog(String(localized: "Upload local-only notes?"), isPresented: $confirmLocalUpload) {
-                        Button(String(localized: "Upload to current account")) {
-                            do {
-                                guard adoptionAccountID == authManager.accountID else { return }
-                                _ = try syncEngine.adoptLocalOnlyNotes(modelContext: modelContext)
-                                triggerManualSync()
-                            } catch { errorMessage = error.localizedDescription }
-                        }
-                    } message: {
-                        Text(String(localized: "Only notes never linked to a remote account will be assigned. Legacy remote notes and other accounts' notes will not be changed."))
-                    }
                     HStack {
                         Label {
                             Text(syncEngine.state.displayText)

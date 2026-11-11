@@ -22,6 +22,8 @@ struct RecoveryAuditEntry: Codable {
     var priorEndpoint: String? = nil
     var priorStartedAt: Date? = nil
     var relatedLocalIDs: [UUID] = []
+    /// Full cloud body preserved before an association (S3-C). Optional so older journals still decode.
+    var candidateHTML: String? = nil
 }
 
 struct VerifiedRecoveryCandidate {

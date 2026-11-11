@@ -104,3 +104,17 @@ struct ListWindowAccessor: NSViewRepresentable {
         window.title = String(localized: "Notes List")
     }
 }
+
+/// Closes its host window once (used when a note window's note is outside the active account scope).
+struct ScopeWindowCloser: NSViewRepresentable {
+    let onClose: () -> Void
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            onClose()
+            view.window?.close()
+        }
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}

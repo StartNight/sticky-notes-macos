@@ -218,9 +218,31 @@ final class RecoveryWorkflowTests: XCTestCase {
         XCTAssertEqual(MockURLProtocol.requests.map(\.method), ["GET", "POST"])
         XCTAssertEqual(n.remoteId, "new-approved"); XCTAssertNil(n.pendingCreateOperationID)
         XCTAssertEqual(n.recoveryRetainedRemoteIDs, ["previous-known"])
-        XCTAssertTrue(n.recoveryBlocksAutomaticRecreate)
+        XCTAssertFalse(n.recoveryBlocksAutomaticRecreate, "确定的显式创建成功后解除禁重建标记（S3-A）")
+        XCTAssertEqual(n.recoveryAudit.last?.action, "clear-recreate-guard-after-confirmed-create")
         XCTAssertEqual(n.recoveryAudit.first?.priorOperationID, "fake-old-operation")
         XCTAssertEqual(n.syncStatus, .synced)
+    }
+
+    func testAssociationPreservesFullCandidateCloudBodyLocallyBeforeAnyOverwrite() async throws {
+        let n = source()
+        serveCandidate(); let verified = try await verify(n)
+        try await engine.confirmRecoveryCandidate(n, candidate: verified, action: .associate, reason: evidence, acknowledged: true)
+        XCTAssertEqual(n.plainTextContent, "local-newer")
+        XCTAssertTrue(MockURLProtocol.requests.allSatisfy { $0.method == "GET" }, "关联只读，不写云端")
+        let snapshots = try context.fetch(FetchDescriptor<StickyNote>()).filter {
+            $0.recoveryAudit.contains { $0.action == "cloud-content-snapshot-before-association" }
+        }
+        let snapshot = try XCTUnwrap(snapshots.first)
+        XCTAssertEqual(snapshots.count, 1)
+        XCTAssertEqual(snapshot.plainTextContent, "cloud-older")
+        XCTAssertEqual(snapshot.recoveryAudit.first?.candidateHTML, "<div>cloud-older</div>")
+        XCTAssertEqual(snapshot.recoveryAudit.first?.remoteID, "candidate")
+        XCTAssertEqual(snapshot.recoveryAudit.first?.changeKey, "key")
+        XCTAssertTrue(snapshot.recoveryPaused && snapshot.recoveryIsArchive, "仅本地保留，不自动上传")
+        XCTAssertNil(snapshot.remoteId)
+        XCTAssertTrue(n.recoveryAudit.last?.relatedLocalIDs.contains(snapshot.id) == true)
+        XCTAssertEqual(snapshot.ownerAccountID, "test-account")
     }
 
     func testDoubleConfirmedRetryWithSameVersionCannotCreateTwice() async throws {

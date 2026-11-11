@@ -56,6 +56,13 @@ final class AccountMigrationTests: XCTestCase {
         let note = try XCTUnwrap(notes.first)
         XCTAssertEqual(notes.count, 1)
         XCTAssertNil(note.ownerAccountID, "归属未知的旧便笺不得绑定到首个登录账号")
+        XCTAssertEqual(note.ownership, .legacyUnknown)
+        XCTAssertTrue(note.hasCloudTrace)
+        for scope in [ActiveScope.account("A"), .account("B"), .unlinkedLocal, .blocked] {
+            XCTAssertFalse(note.isVisible(in: scope), "旧库未归属数据对所有账号/范围隐藏")
+            XCTAssertTrue(NoteScopeQuery.visible(notes, in: scope).isEmpty)
+        }
+        XCTAssertEqual(NoteScopeQuery.quarantined(notes).map(\.id), [note.id])
         XCTAssertEqual(note.plainTextContent, "legacy-private")
         XCTAssertEqual(note.remoteId, "legacy-id")
         XCTAssertEqual(note.changeKey, "legacy-key")

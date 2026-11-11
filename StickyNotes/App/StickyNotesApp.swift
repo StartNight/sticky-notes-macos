@@ -48,6 +48,8 @@ struct StickyNotesApp: App {
         } else {
             storeURL = URL.applicationSupportDirectory.appendingPathComponent("default.store")
         }
+        // Copy-only safety net before this build first opens the store; never overwrites/moves/deletes.
+        _ = try? StoreSafetyBackup.createIfNeeded(storeURL: storeURL)
         let config = ModelConfiguration(schema: schema, url: storeURL)
         do {
             return try ModelContainer(for: schema, configurations: [config])
@@ -94,11 +96,12 @@ struct StickyNotesApp: App {
                 Button(String(localized: "New Note")) {
                     let context = sharedContainer.mainContext
                     let color = NoteColor.allCases.randomElement() ?? .yellow
-                    let note = StickyNote(color: color, ownerAccountID: AuthManager.shared.accountID)
+                    let scope = AuthManager.shared.activeScope
+                    guard let note = StickyNote.make(in: scope, color: color) else { NSSound.beep(); return }
                     context.insert(note)
                     try? context.save()
                     openWindow(value: note.id)
-                    if AuthManager.shared.isAuthenticated {
+                    if scope.accountID != nil {
                         SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: context)
                     }
                 }

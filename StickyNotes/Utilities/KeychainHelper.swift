@@ -2,20 +2,50 @@ import Foundation
 import Security
 
 /// Injectable SecItem boundary. Tests never use the application's credential service.
+/// `dataProtection` is kept for source compatibility; production always passes `false`
+/// (the data-protection keychain needs an entitlement this build cannot have).
 protocol KeychainBackend {
     func copy(account: String, dataProtection: Bool, interactive: Bool) -> (OSStatus, Data?)
     func write(account: String, data: Data, dataProtection: Bool) -> OSStatus
     func delete(account: String, dataProtection: Bool) -> OSStatus
 }
 
+/// Outcome of a keychain read attempt. Distinguishes "needs a system prompt" from every other failure.
+enum KeychainProbe: Equatable {
+    case success
+    case notFound
+    /// errSecInteractionNotAllowed (-25308) / errSecInteractionRequired (-25315): the system WOULD prompt.
+    case needsInteraction
+    /// User cancelled (-128) or authorization failed (-25293). Not retried in the same launch.
+    case denied(OSStatus)
+    case failed(OSStatus)
+
+    static func classify(_ status: OSStatus) -> KeychainProbe {
+        switch status {
+        case errSecSuccess: return .success
+        case errSecItemNotFound: return .notFound
+        case errSecInteractionNotAllowed, errSecInteractionRequired: return .needsInteraction
+        case errSecUserCanceled, errSecAuthFailed: return .denied(status)
+        default: return .failed(status)
+        }
+    }
+}
+
+enum KeychainLoadState: Equatable {
+    case idle, ready, needsConsent
+    case denied(OSStatus)
+    case failed(OSStatus)
+}
+
 private struct SystemKeychainBackend: KeychainBackend {
     let service: String
-    private func query(_ account: String, _ dp: Bool) -> [String: Any] {
+    private func query(_ account: String) -> [String: Any] {
+        // Login (file-based) keychain only. No data-protection probe, no kSecAttrAccessible.
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-         kSecAttrAccount as String: account, kSecUseDataProtectionKeychain as String: dp]
+         kSecAttrAccount as String: account]
     }
     func copy(account: String, dataProtection: Bool, interactive: Bool) -> (OSStatus, Data?) {
-        var q = query(account, dataProtection)
+        var q = query(account)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         if !interactive { q[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail }
@@ -24,159 +54,305 @@ private struct SystemKeychainBackend: KeychainBackend {
         return (status, result as? Data)
     }
     func write(account: String, data: Data, dataProtection: Bool) -> OSStatus {
-        let q = query(account, dataProtection)
+        let q = query(account)
         let status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        NSLog("AUTH_KEYCHAIN sec=update backend=%@ status=%d", dataProtection ? "dataProtection" : "login", status)
+        NSLog("AUTH_KEYCHAIN sec=update status=%d", status)
         guard status == errSecItemNotFound else { return status }
         var item = q
         item[kSecValueData as String] = data
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         let addStatus = SecItemAdd(item as CFDictionary, nil)
-        NSLog("AUTH_KEYCHAIN sec=add backend=%@ status=%d", dataProtection ? "dataProtection" : "login", addStatus)
+        NSLog("AUTH_KEYCHAIN sec=add status=%d", addStatus)
         return addStatus
     }
     func delete(account: String, dataProtection: Bool) -> OSStatus {
-        SecItemDelete(query(account, dataProtection) as CFDictionary)
+        SecItemDelete(query(account) as CFDictionary)
     }
 }
 
-/// One cached session, one canonical backend. Never retries a denied read through another store.
+/// One cached session, one canonical (login) backend.
+///
+/// Threading contract: nothing the UI/main thread calls ever waits on the keychain.
+///  - `read`/`readString`/`isHydrated`/`loadState` only take a short state lock and never touch SecItem.
+///  - Every SecItem call runs under `ioLock`, via the `*Async` entry points on a background queue.
+///  - A denied/cancelled read is final for this launch: no retry, no automatic delete/recreate.
 final class KeychainHelper: @unchecked Sendable {
     static let shared = KeychainHelper()
     static let sessionAccount = "ms_auth_session"
     static let legacyAccounts = ["ms_access_token", "ms_refresh_token", "ms_token_expiry", "ms_user_email", "ms_user_name"]
     private let backend: KeychainBackend?
-    private let lock = NSLock()
+    private let stateLock = NSLock()   // protects the fields below; held only briefly, never across SecItem calls
+    private let ioLock = NSLock()      // serializes SecItem calls
+    private let ioQueue = DispatchQueue(label: "com.shenanigans.sticky-notes.keychain", qos: .userInitiated)
     private var cache: [String: Data] = [:]
     private var hydrated = false
     private var writable = true
-    private var canonicalDP = false
-    private(set) var copyMatchingCallCount = 0
-    private(set) var writeCallCount = 0
-    private(set) var deleteCallCount = 0
+    private var state: KeychainLoadState = .idle
+    private var interactiveAttempted = false
+    private var epoch = 0
+    private var _copyCount = 0, _writeCount = 0, _deleteCount = 0
+    var copyMatchingCallCount: Int { stateLock.lock(); defer { stateLock.unlock() }; return _copyCount }
+    var writeCallCount: Int { stateLock.lock(); defer { stateLock.unlock() }; return _writeCount }
+    var deleteCallCount: Int { stateLock.lock(); defer { stateLock.unlock() }; return _deleteCount }
 
     init(service: String = "com.shenanigans.sticky-notes", inMemoryOnly: Bool = false,
          backend: KeychainBackend? = nil) {
         self.backend = inMemoryOnly ? nil : (backend ?? SystemKeychainBackend(service: service))
         hydrated = inMemoryOnly
+        if inMemoryOnly { state = .ready }
     }
 
-    /// Safe diagnostics: operation/backend/status/cumulative counts ONLY, never values or identity.
-    private func record(_ operation: String, dp: Bool, status: OSStatus) {
-        NSLog("AUTH_KEYCHAIN op=%@ backend=%@ status=%d reads=%d writes=%d deletes=%d",
-              operation, dp ? "dataProtection" : "login", status,
-              copyMatchingCallCount, writeCallCount, deleteCallCount)
+    // MARK: Non-blocking state
+
+    var isHydrated: Bool { stateLock.lock(); defer { stateLock.unlock() }; return hydrated }
+    var loadState: KeychainLoadState { stateLock.lock(); defer { stateLock.unlock() }; return state }
+    /// Apply a probe result only if no sign-out (`discardCache`) happened while the read was in flight.
+    private func commit(_ startEpoch: Int, _ body: () -> Void) {
+        stateLock.lock(); defer { stateLock.unlock() }
+        if epoch == startEpoch { body() }
     }
-    private func copy(_ account: String, dp: Bool, interactive: Bool = true) -> (OSStatus, Data?) {
-        copyMatchingCallCount += 1
-        let result = backend!.copy(account: account, dataProtection: dp, interactive: interactive)
-        record(account == Self.sessionAccount ? "sessionRead" : "legacyRead", dp: dp, status: result.0)
+    private func withState<T>(_ body: () -> T) -> T { stateLock.lock(); defer { stateLock.unlock() }; return body() }
+    /// Bumped by `discardCache()`; async writes queued before a sign-out refuse to run afterwards.
+    var currentEpoch: Int { withState { epoch } }
+
+    /// Safe diagnostics: operation/status/cumulative counts ONLY, never values or identity.
+    private func record(_ operation: String, status: OSStatus) {
+        NSLog("AUTH_KEYCHAIN op=%@ status=%d result=%@ reads=%d writes=%d deletes=%d",
+              operation, status, String(describing: KeychainProbe.classify(status)), copyMatchingCallCount, writeCallCount, deleteCallCount)
+    }
+    private func copy(_ account: String, interactive: Bool) -> (OSStatus, Data?) {
+        withState { _copyCount += 1 }
+        let result = backend!.copy(account: account, dataProtection: false, interactive: interactive)
+        record((account == Self.sessionAccount ? "sessionRead" : "legacyRead") + (interactive ? "Interactive" : "NonInteractive"), status: result.0)
         return result
     }
-    private func missing(_ status: OSStatus) -> Bool {
-        status == errSecItemNotFound || status == errSecMissingEntitlement
+
+    // MARK: Reads (background only)
+
+    /// Startup step 1: never shows UI. Safe to call from any thread except main (it blocks on SecItem).
+    func probeNonInteractive() -> KeychainProbe {
+        ioLock.lock(); defer { ioLock.unlock() }
+        return probeLocked(interactive: false)
     }
-    private func hydrateLocked(includeLegacy: Bool = true) {
-        guard !hydrated else { return }
-        hydrated = true // includes denial: concurrent/repeated reads must not reprompt
-        guard backend != nil else { return }
-        for dp in [true, false] {
-            canonicalDP = dp
-            let (status, data) = copy(Self.sessionAccount, dp: dp)
-            if status == errSecSuccess {
-                guard let data, let decoded = try? JSONDecoder().decode([String: Data].self, from: data) else {
-                    writable = false; return // don't overwrite an unreadable session
-                }
-                canonicalDP = dp
-                cache = decoded
-                return // no migration write on every launch
-            }
-            guard missing(status) else { writable = false; return }
+
+    /// Startup step 2, only after the in-app explanation and only once per launch.
+    func readInteractive() -> KeychainProbe {
+        ioLock.lock(); defer { ioLock.unlock() }
+        let allowed = withState { () -> Bool in
+            guard state == .needsConsent, !interactiveAttempted else { return false }
+            interactiveAttempted = true
+            return true
         }
-        guard includeLegacy else { return }
-        // Old per-field entries: bounded known accounts, noninteractive, no service-wide secret dump.
+        guard allowed else { return currentProbeResult() }
+        return probeLocked(interactive: true)
+    }
+
+    /// The user chose not to authorize this launch.
+    func declineInteractiveRead() {
+        withState {
+            interactiveAttempted = true
+            hydrated = true; writable = false
+            state = .denied(errSecUserCanceled)
+        }
+        NSLog("AUTH_KEYCHAIN op=consentDeclined status=%d", errSecUserCanceled)
+    }
+
+    private func currentProbeResult() -> KeychainProbe {
+        withState {
+            switch state {
+            case .ready: return .success
+            case .idle: return .failed(errSecNotAvailable)
+            case .needsConsent: return .needsInteraction
+            case .denied(let s): return .denied(s)
+            case .failed(let s): return .failed(s)
+            }
+        }
+    }
+
+    private func probeLocked(interactive: Bool) -> KeychainProbe {
+        guard backend != nil else { return .success }
+        let startEpoch = withState { epoch }
+        if withState({ hydrated }) { return currentProbeResult() }
+        let (status, data) = copy(Self.sessionAccount, interactive: interactive)
+        switch KeychainProbe.classify(status) {
+        case .success:
+            guard let data, let decoded = try? JSONDecoder().decode([String: Data].self, from: data) else {
+                commit(startEpoch) { hydrated = true; writable = false; state = .failed(errSecDecode) } // never overwrite an unreadable session
+                return .failed(errSecDecode)
+            }
+            commit(startEpoch) { cache = decoded; hydrated = true; state = .ready }
+            return .success
+        case .notFound:
+            return discoverLegacyLocked(interactive: interactive, startEpoch: startEpoch)
+        case .needsInteraction:
+            if interactive { // still refused after the user agreed: treat as denied, never loop
+                commit(startEpoch) { hydrated = true; writable = false; state = .denied(status) }
+                return .denied(status)
+            }
+            commit(startEpoch) { state = .needsConsent }
+            return .needsInteraction
+        case .denied(let s):
+            commit(startEpoch) { hydrated = true; writable = false; state = .denied(s) }
+            return .denied(s)
+        case .failed(let s):
+            commit(startEpoch) { hydrated = true; writable = false; state = .failed(s) }
+            return .failed(s)
+        }
+    }
+
+    /// Old per-field entries: bounded known accounts, no service-wide dump, never deleted here.
+    private func discoverLegacyLocked(interactive: Bool, startEpoch: Int) -> KeychainProbe {
         var legacy: [String: Data] = [:]
         for account in Self.legacyAccounts {
-            for dp in [true, false] {
-                let (status, data) = copy(account, dp: dp, interactive: false)
-                if status == errSecSuccess, let data { legacy[account] = data; break }
-                guard missing(status) else { writable = false; return }
+            let (status, data) = copy(account, interactive: interactive)
+            switch KeychainProbe.classify(status) {
+            case .success: if let data { legacy[account] = data }
+            case .notFound: continue
+            case .needsInteraction:
+                if interactive {
+                    commit(startEpoch) { hydrated = true; writable = false; state = .denied(status) }
+                    return .denied(status)
+                }
+                commit(startEpoch) { state = .needsConsent }
+                return .needsInteraction
+            case .denied(let s):
+                commit(startEpoch) { hydrated = true; writable = false; state = .denied(s) }
+                return .denied(s)
+            case .failed(let s):
+                commit(startEpoch) { hydrated = true; writable = false; state = .failed(s) }
+                return .failed(s)
             }
         }
-        cache = legacy
-        if !cache.isEmpty { _ = persistLocked() }
-        // Retain legacy entries; no automatic credential deletion or ACL changes.
+        commit(startEpoch) { cache = legacy; hydrated = true; state = .ready }
+        if !legacy.isEmpty, withState({ epoch == startEpoch }) { _ = persistLocked() }
+        return legacy.isEmpty ? .notFound : .success
     }
+
+    /// Explicit blocking hydrate (background threads / tests). Equivalent to the non-interactive probe.
     @discardableResult
-    func update(strings: [String: String]) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        hydrateLocked()
-        guard writable else { return false }
-        let previous = cache
-        for (key, value) in strings { cache[key] = Data(value.utf8) }
+    func hydrateBlocking() -> KeychainProbe { probeNonInteractive() }
+
+    func probeNonInteractiveAsync() async -> KeychainProbe { await onIOQueue { self.probeNonInteractive() } }
+    func readInteractiveAsync() async -> KeychainProbe { await onIOQueue { self.readInteractive() } }
+    private func onIOQueue<T>(_ work: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { continuation in
+            ioQueue.async { continuation.resume(returning: work()) }
+        }
+    }
+
+    // MARK: Cached reads (never block)
+
+    func read(key: String) -> Data? { withState { cache[key] } }
+    func readString(key: String) -> String? { read(key: key).flatMap { String(data: $0, encoding: .utf8) } }
+
+    // MARK: Writes
+
+    @discardableResult
+    func update(strings: [String: String], requiredEpoch: Int? = nil) -> Bool {
+        ioLock.lock(); defer { ioLock.unlock() }
+        let previous: [String: Data]? = withState {
+            guard hydrated, writable, requiredEpoch == nil || requiredEpoch == epoch else { return nil }
+            let old = cache
+            for (key, value) in strings { cache[key] = Data(value.utf8) }
+            return old
+        }
+        guard let previous else { return false }
         if persistLocked() { return true }
-        cache = previous
+        withState { cache = previous }
         return false
     }
-    /// New interactive login replaces the whole session in one write, without importing
-    /// old per-field tokens. This is never used for startup or silent token refresh.
+    /// New interactive login replaces the whole session in one write. It does not read the old item
+    /// (nothing to merge, no old-token import) and never uses the startup/silent-refresh path.
     @discardableResult
-    func replaceSession(strings: [String: String]) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        hydrateLocked(includeLegacy: false)
-        let previous = cache
-        cache = strings.mapValues { Data($0.utf8) }
-        writable = true
+    func replaceSession(strings: [String: String], requiredEpoch: Int? = nil) -> Bool {
+        ioLock.lock(); defer { ioLock.unlock() }
+        let previous: [String: Data]? = withState {
+            guard requiredEpoch == nil || requiredEpoch == epoch else { return nil }
+            let old = cache
+            cache = strings.mapValues { Data($0.utf8) }
+            hydrated = true; writable = true; state = .ready
+            return old
+        }
+        guard let previous else { return false }
         if persistLocked() { return true }
-        cache = previous
+        withState { cache = previous }
         return false
     }
     @discardableResult
     func save(key: String, data: Data) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        hydrateLocked()
-        guard writable else { return false }
-        cache[key] = data
-        return persistLocked()
+        ioLock.lock(); defer { ioLock.unlock() }
+        let ok = withState { () -> Bool in
+            guard hydrated, writable else { return false }
+            cache[key] = data
+            return true
+        }
+        return ok && persistLocked()
     }
     @discardableResult
     func save(key: String, string: String) -> Bool { save(key: key, data: Data(string.utf8)) }
-    func read(key: String) -> Data? {
-        lock.lock(); defer { lock.unlock() }
-        hydrateLocked(); return cache[key]
-    }
-    func readString(key: String) -> String? { read(key: key).flatMap { String(data: $0, encoding: .utf8) } }
     @discardableResult
     func delete(key: String) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        hydrateLocked()
-        guard writable else { return false }
-        cache.removeValue(forKey: key)
-        return persistLocked()
+        ioLock.lock(); defer { ioLock.unlock() }
+        let ok = withState { () -> Bool in
+            guard hydrated, writable else { return false }
+            cache.removeValue(forKey: key)
+            return true
+        }
+        return ok && persistLocked()
     }
-    /// Called only on explicit sign-out. No hydration, no intermediate token rewrites.
+
+    func updateAsync(strings: [String: String]) async -> Bool {
+        let epoch = currentEpoch
+        return await onIOQueue { self.update(strings: strings, requiredEpoch: epoch) }
+    }
+    func replaceSessionAsync(strings: [String: String]) async -> Bool {
+        let epoch = currentEpoch
+        return await onIOQueue { self.replaceSession(strings: strings, requiredEpoch: epoch) }
+    }
+
+    // MARK: Sign-out / cleanup
+
+    /// Synchronous, memory only: forget the session and invalidate queued writes. No SecItem call.
+    func discardCache() {
+        withState { cache.removeAll(); hydrated = true; writable = true; state = .ready; epoch += 1 }
+    }
+
+    /// Sign-out: removes ONLY the current session item (`ms_auth_session`). Legacy per-field items and
+    /// anything else in the keychain are left alone (they are cleaned from Settings after a double confirmation).
     @discardableResult
     func clearAll() -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        cache.removeAll(); hydrated = true; writable = true
+        discardCache()
+        ioLock.lock(); defer { ioLock.unlock() }
+        guard let backend else { return true }
+        withState { _deleteCount += 1 }
+        let status = backend.delete(account: Self.sessionAccount, dataProtection: false)
+        record("sessionDelete", status: status)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+    func clearAllAsync() async -> Bool { await onIOQueue { self.clearAll() } }
+
+    /// Explicit Settings action (after a two-step confirmation): remove old per-field items from earlier versions.
+    @discardableResult
+    func clearLegacyItems() -> Bool {
+        ioLock.lock(); defer { ioLock.unlock() }
         guard let backend else { return true }
         var success = true
-        for account in [Self.sessionAccount] + Self.legacyAccounts {
-            for dp in [true, false] {
-                deleteCallCount += 1
-                let status = backend.delete(account: account, dataProtection: dp)
-                record("delete", dp: dp, status: status)
-                if status != errSecSuccess && !missing(status) { success = false }
-            }
+        for account in Self.legacyAccounts {
+            withState { _deleteCount += 1 }
+            let status = backend.delete(account: account, dataProtection: false)
+            record("legacyDelete", status: status)
+            if status != errSecSuccess && status != errSecItemNotFound { success = false }
         }
         return success
     }
+    func clearLegacyItemsAsync() async -> Bool { await onIOQueue { self.clearLegacyItems() } }
+
     private func persistLocked() -> Bool {
         guard let backend else { return true }
-        guard writable, let blob = try? JSONEncoder().encode(cache) else { return false }
-        writeCallCount += 1
-        let status = backend.write(account: Self.sessionAccount, data: blob, dataProtection: canonicalDP)
-        record("write", dp: canonicalDP, status: status)
+        let blob: Data? = withState { writable ? (try? JSONEncoder().encode(cache)) : nil }
+        guard let blob else { return false }
+        withState { _writeCount += 1 }
+        let status = backend.write(account: Self.sessionAccount, data: blob, dataProtection: false)
+        record("write", status: status)
         return status == errSecSuccess
     }
 }

@@ -12,6 +12,7 @@ final class SyncAuthStub: SyncAuthProviding {
     func ensureAccountID() async throws -> String { accountID ?? "test-account" }
 
     var isAuthenticated: Bool = true
+    var isAuthenticating: Bool = false
     var accessToken: String = "test-token"
     var refreshCallCount = 0
     /// Safety valve so a production code path that retries forever cannot hang the test run.
@@ -33,6 +34,7 @@ final class SyncAuthStub: SyncAuthProviding {
         accountID = "test-account"
         sessionGeneration = UUID()
         isAuthenticated = true
+        isAuthenticating = false
         accessToken = "test-token"
         refreshCallCount = 0
         maxRefreshesBeforeThrow = 10

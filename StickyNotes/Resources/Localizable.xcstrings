@@ -2170,6 +2170,838 @@
           }
         }
       }
+    },
+    "Local Data": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local Data"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地数据"
+          }
+        }
+      }
+    },
+    "Notes from other accounts, no-account notes and legacy unowned notes are hidden here and never uploaded to this account. Manage them under Local Data.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes from other accounts, no-account notes and legacy unowned notes are hidden here and never uploaded to this account. Manage them under Local Data."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "其他账号的便笺、无账号便笺和旧版本归属不明的便笺在此处不显示，也不会上传到当前账号。请到「本地数据」管理。"
+          }
+        }
+      }
+    },
+    "Allow replacement sync for this note (local setting)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow replacement sync for this note (local setting)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许此便笺使用替换式同步（仅本地设置）"
+          }
+        }
+      }
+    },
+    "If updates to the linked object keep failing (for example without ShortNotes permission), this lets the normal create-then-delete replacement run for this note. No Microsoft write happens now.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If updates to the linked object keep failing (for example without ShortNotes permission), this lets the normal create-then-delete replacement run for this note. No Microsoft write happens now."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "若对已关联对象的更新持续失败（例如缺少 ShortNotes 权限），此项允许此便笺走常规的「先新建再删除」替换流程。此刻不会向微软写入任何内容。"
+          }
+        }
+      }
+    },
+    "Current data scope": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Current data scope"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前数据范围"
+          }
+        }
+      }
+    },
+    "Export visible notes…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export visible notes…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出当前可见便笺…"
+          }
+        }
+      }
+    },
+    "Export works offline and signed out. It only writes to a file you choose and contains no login tokens.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export works offline and signed out. It only writes to a file you choose and contains no login tokens."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出无需联网或登录，只会写入您选择的文件，不含任何登录令牌。"
+          }
+        }
+      }
+    },
+    "No-account notes": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No-account notes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无账号便笺"
+          }
+        }
+      }
+    },
+    "Created while signed out. They are never uploaded unless you move them into an account.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Created while signed out. They are never uploaded unless you move them into an account."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未登录时创建。除非您把它们归入某个账号，否则不会上传。"
+          }
+        }
+      }
+    },
+    "Sync to this account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync to this account"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同步到当前账号"
+          }
+        }
+      }
+    },
+    "Export no-account notes…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export no-account notes…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出无账号便笺…"
+          }
+        }
+      }
+    },
+    "Quarantine: unknown owner (older versions)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quarantine: unknown owner (older versions)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "隔离区：归属不明（旧版本数据）"
+          }
+        }
+      }
+    },
+    "Saved by an older version that did not record the account. They are hidden everywhere and never assigned automatically.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved by an older version that did not record the account. They are hidden everywhere and never assigned automatically."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "由未记录账号的旧版本保存。它们在任何范围内都不显示，也不会被自动归属。"
+          }
+        }
+      }
+    },
+    "Has cloud traces — owner could be any account. Copy keeps this original untouched.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Has cloud traces — owner could be any account. Copy keeps this original untouched."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "带有云端痕迹——归属可能是任一账号。复制不会改动此原件。"
+          }
+        }
+      }
+    },
+    "Copy to current account as new note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Copy to current account as new note"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "复制到当前账号（作为新便笺）"
+          }
+        }
+      }
+    },
+    "Move to current account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Move to current account"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移入当前账号"
+          }
+        }
+      }
+    },
+    "Keep as no-account note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep as no-account note"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保留为无账号便笺"
+          }
+        }
+      }
+    },
+    "Export quarantined notes…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export quarantined notes…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出隔离区便笺…"
+          }
+        }
+      }
+    },
+    "Other accounts' local data": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Other accounts' local data"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "其他账号的本地数据"
+          }
+        }
+      }
+    },
+    "Hidden while this scope is active. Only counts are shown.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hidden while this scope is active. Only counts are shown."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前范围内不显示，仅列出数量。"
+          }
+        }
+      }
+    },
+    "Export…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出…"
+          }
+        }
+      }
+    },
+    "Export data outside the current scope?": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export data outside the current scope?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出当前范围之外的数据？"
+          }
+        }
+      }
+    },
+    "Export to a file I choose": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export to a file I choose"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出到我选择的文件"
+          }
+        }
+      }
+    },
+    "This writes notes that do not belong to the current scope to a file you choose. Nothing is uploaded or changed.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This writes notes that do not belong to the current scope to a file you choose. Nothing is uploaded or changed."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这会把不属于当前范围的便笺写入您选择的文件。不会上传或改动任何内容。"
+          }
+        }
+      }
+    },
+    "Identity not confirmed — no notes are shown or synced.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Identity not confirmed — no notes are shown or synced."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账号身份未确认——不显示也不同步任何便笺。"
+          }
+        }
+      }
+    },
+    "Signed out — only no-account notes are shown.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Signed out — only no-account notes are shown."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未登录——仅显示无账号便笺。"
+          }
+        }
+      }
+    },
+    "Signed in — only this account's notes are shown.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Signed in — only this account's notes are shown."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已登录——仅显示此账号的便笺。"
+          }
+        }
+      }
+    },
+    "%@ note(s). Sign in to move them into an account.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ note(s). Sign in to move them into an account."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 条便笺。登录后才可归入账号。"
+          }
+        }
+      }
+    },
+    "Account …%@: %@ note(s)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Account …%@: %@ note(s)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账号 …%@：%@ 条便笺"
+          }
+        }
+      }
+    },
+    "Some local notes belong to another scope and are hidden. Manage them in Settings → Local Data.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some local notes belong to another scope and are hidden. Manage them in Settings → Local Data."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "部分本地便笺属于其他范围，已隐藏。请在「设置 → 本地数据」中管理。"
+          }
+        }
+      }
+    },
+    "Sync to This Account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync to This Account"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同步到此账号"
+          }
+        }
+      }
+    },
+    "Not Now (Keep as No-Account Notes)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not Now (Keep as No-Account Notes)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂不同步（保留为无账号便笺）"
+          }
+        }
+      }
+    },
+    "this account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "this account"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此账号"
+          }
+        }
+      }
+    },
+    "Sync no-account notes to %@?": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync no-account notes to %@?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将无账号便笺同步到 %@？"
+          }
+        }
+      }
+    },
+    "%@ note(s) were created while signed out: %@. Nothing is merged or uploaded until you confirm. If you decline they stay as local no-account notes.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ note(s) were created while signed out: %@. Nothing is merged or uploaded until you confirm. If you decline they stay as local no-account notes."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未登录时创建了 %@ 条便笺：%@。确认之前不会合并或上传。若选择暂不同步，它们会保留为本地无账号便笺。"
+          }
+        }
+      }
+    },
+    "Confirming your Microsoft account… no notes are shown until the identity is verified.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirming your Microsoft account… no notes are shown until the identity is verified."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在确认微软账号……身份核实前不显示任何便笺。"
+          }
+        }
+      }
+    },
+    "Retry Identity Check": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry Identity Check"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重试确认账号"
+          }
+        }
+      }
+    },
+    "Keychain access needed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keychain access needed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要钥匙串授权"
+          }
+        }
+      }
+    },
+    "Continue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "继续"
+          }
+        }
+      }
+    },
+    "Not Now": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not Now"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂不"
+          }
+        }
+      }
+    },
+    "macOS may show the keychain prompt twice. Please choose Always Allow both times. Choosing Deny or Cancel deletes nothing, and the app will not ask again until you restart it.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS may show the keychain prompt twice. Please choose Always Allow both times. Choosing Deny or Cancel deletes nothing, and the app will not ask again until you restart it."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "macOS 可能连续弹出两次钥匙串授权窗口，请两次都选择「始终允许」。选择「拒绝」或「取消」不会删除任何数据，且在重启 App 前不会再次询问。"
+          }
+        }
+      }
+    },
+    "Old keychain entries": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Old keychain entries"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "旧版钥匙串条目"
+          }
+        }
+      }
+    },
+    "Earlier versions stored sign-in tokens as separate keychain entries. Signing out never deletes them. Remove them here only if you no longer need them; the current sign-in is not affected.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Earlier versions stored sign-in tokens as separate keychain entries. Signing out never deletes them. Remove them here only if you no longer need them; the current sign-in is not affected."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "早期版本把登录令牌分开存成多个钥匙串条目。退出登录不会删除它们。只有在确认不再需要时才在此移除；当前登录不受影响。"
+          }
+        }
+      }
+    },
+    "Remove old keychain entries…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove old keychain entries…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除旧版钥匙串条目…"
+          }
+        }
+      }
+    },
+    "Remove old keychain entries?": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove old keychain entries?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除旧版钥匙串条目？"
+          }
+        }
+      }
+    },
+    "Continue…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "继续…"
+          }
+        }
+      }
+    },
+    "This deletes up to 5 old per-field sign-in entries (access/refresh token, expiry, email, name) left by earlier versions. Your notes and the current session are not touched.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This deletes up to 5 old per-field sign-in entries (access/refresh token, expiry, email, name) left by earlier versions. Your notes and the current session are not touched."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这会删除早期版本遗留的最多 5 个分字段登录条目（访问/刷新令牌、过期时间、邮箱、名称）。便笺和当前会话不受影响。"
+          }
+        }
+      }
+    },
+    "Really delete the old entries?": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Really delete the old entries?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "确定删除这些旧条目？"
+          }
+        }
+      }
+    },
+    "Delete Old Entries": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete Old Entries"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除旧条目"
+          }
+        }
+      }
+    },
+    "This cannot be undone.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This cannot be undone."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此操作无法撤销。"
+          }
+        }
+      }
+    },
+    "Old keychain entries removed.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Old keychain entries removed."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已移除旧版钥匙串条目。"
+          }
+        }
+      }
+    },
+    "Some old keychain entries could not be removed.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some old keychain entries could not be removed."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "部分旧版钥匙串条目未能移除。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

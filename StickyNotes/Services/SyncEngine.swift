@@ -125,6 +125,8 @@ final class SyncEngine {
 
     /// Remote IDs deleted locally whose DELETE has not yet succeeded (in-memory retry queue).
     private var pendingRemoteDeletes: [String: Set<String>] = [:]
+    /// Cloud-new notes not imported in the latest pull because some local note has an unreadable journal.
+    private(set) var skippedCloudCreateCount = 0
     private var lastSyncKey: String { "ms_last_sync_timestamp.account." + (authManager.accountID ?? "unverified") }
 
     struct Scope {
@@ -173,23 +175,6 @@ final class SyncEngine {
         startPeriodicSync()
     }
 
-    /// Explicit opt-in only for never-synced local notes. Legacy remote links remain quarantined.
-    func adoptLocalOnlyNotes(modelContext: ModelContext) throws -> Int {
-        let scope = try currentScope()
-        let notes = try modelContext.fetch(FetchDescriptor<StickyNote>())
-        var count = 0
-        for note in notes where note.ownerAccountID == nil && note.remoteId == nil && !note.isDeletedLocally {
-            note.ownerAccountID = scope.accountID
-            note.changeKey = nil
-            note.webNoteJSON = nil
-            note.lastSyncedAt = nil
-            note.syncStatus = .pendingUpload
-            count += 1
-        }
-        try modelContext.save()
-        return count
-    }
-
     // MARK: - Periodic Sync
 
     func startPeriodicSync() {
@@ -215,6 +200,7 @@ final class SyncEngine {
         fullSyncRunning = true
         defer { fullSyncRunning = false }
         self.state = .syncing
+        skippedCloudCreateCount = 0
 
         do {
             let generation = authManager.sessionGeneration
@@ -223,10 +209,6 @@ final class SyncEngine {
             let scope = try currentScope()
             let token = try await authManager.getValidAccessToken()
             try validate(scope)
-            let localJournalNotes = try modelContext.fetch(FetchDescriptor<StickyNote>())
-            guard !localJournalNotes.contains(where: { $0.ownerAccountID == scope.accountID && $0.hasCorruptSyncJournal }) else {
-                throw syncError(-36, "同步清理记录无法解析，已保留数据并停止同步。")
-            }
             // 1. Pull remote changes
             try await pullNotes(token: token, modelContext: modelContext, scope: scope)
             // 2. Push pending local changes
@@ -288,9 +270,11 @@ final class SyncEngine {
         // Fetch all local notes
         let descriptor = FetchDescriptor<StickyNote>()
         let localNotes = try modelContext.fetch(descriptor)
-        if localNotes.contains(where: { $0.ownerAccountID == scope.accountID && $0.hasCorruptSyncJournal }) {
-            throw syncError(-36, "同步清理记录无法解析，已保留数据并停止同步。")
-        }
+        // A note whose cleanup journal is unreadable is isolated individually (never uploaded/deleted/overwritten).
+        // Because its retired-ID list is unknown, creating NEW local notes from the cloud is paused so a retired
+        // object cannot be resurrected; updates to other known notes and all unrelated uploads continue.
+        let journalIsolated = localNotes.contains { $0.ownerAccountID == scope.accountID && $0.hasCorruptSyncJournal }
+        var skippedCloudCreates = 0
         var retiredIDs: Set<String> = []
         var localByRemoteId: [String: StickyNote] = [:]
         for note in localNotes where note.ownerAccountID == scope.accountID {
@@ -329,6 +313,7 @@ final class SyncEngine {
             }
 
             if let localNote = existingLocal {
+                if localNote.hasCorruptSyncJournal { continue }
                 // An unresolved POST may have committed. Keep its original content/metadata frozen
                 // for explicit reconciliation; don't turn it into an auto-uploadable conflict copy.
                 if localNote.pendingCreateOperationID != nil || localNote.recoveryPaused || localNote.recoveryPendingDeleteID != nil || localNote.hasCorruptRecoveryJournal { continue }
@@ -397,6 +382,7 @@ final class SyncEngine {
                     localNote.lastSyncedAt = Date()
                 }
             } else {
+                if journalIsolated { skippedCloudCreates += 1; continue }
                 // New note from cloud
                 let newNote = StickyNote(
                     color: noteColor,
@@ -417,6 +403,7 @@ final class SyncEngine {
         }
 
         try modelContext.save()
+        skippedCloudCreateCount = skippedCloudCreates
     }
 
     // MARK: - Push Pending Local Notes
@@ -433,7 +420,7 @@ final class SyncEngine {
 
         var uploadFailures = 0
         for note in pendingNotes where note.ownerAccountID == scope.accountID {
-            if note.isDeletedLocally || note.recoveryPaused || note.recoveryPendingDeleteID != nil { continue }
+            if note.isDeletedLocally || note.recoveryPaused || note.recoveryPendingDeleteID != nil || note.hasCorruptSyncJournal { continue }
             do {
                 try await uploadNote(note, token: token, scope: scope)
             } catch {
@@ -555,6 +542,12 @@ final class SyncEngine {
             }
 
             try finishUpload(note, data: data, uploadedHTML: html, isCreate: false, snapshot: snapshot)
+            // A verified 2xx PATCH proves the recovered binding is writable: the "no automatic recreate" guard
+            // has served its purpose (S3-A). It stays on only while PATCH keeps failing.
+            if note.recoveryBlocksAutomaticRecreate && note.syncStatus == .synced {
+                note.recoveryBlocksAutomaticRecreate = false
+                try saveDurably(note)
+            }
         } else {
             guard let notesURL = URL(string: "\(graphEndpoint)/me/notes") else {
                 note.syncStatus = .error
@@ -829,17 +822,23 @@ final class SyncEngine {
         try validate(scope)
         let count = problemCount(modelContext: modelContext, scope: scope)
         incompleteTaskCount = count
-        if count > 0 { throw syncError(-34, "仍有 \(count) 项本地改动、删除或恢复问题未完成。") }
+        if count > 0 {
+            let corrupt = ((try? modelContext.fetch(FetchDescriptor<StickyNote>())) ?? [])
+                .filter { $0.ownerAccountID == scope.accountID && $0.hasCorruptSyncJournal }.count
+            var message = "仍有 \(count) 项本地改动、删除或恢复问题未完成。"
+            if corrupt > 0 { message += "其中 \(corrupt) 条便笺的同步日志损坏，已单独隔离（不上传、不删除、不覆盖），其余便笺照常同步。" }
+            if corrupt > 0 && skippedCloudCreateCount > 0 { message += "另有 \(skippedCloudCreateCount) 条云端新便笺暂未导入。" }
+            throw syncError(-34, message)
+        }
     }
 
     private func pushPendingDeletes(token: String, modelContext: ModelContext, scope: Scope) async throws -> Int {
         try validate(scope)
-        let localNotes = try modelContext.fetch(FetchDescriptor<StickyNote>()).filter { $0.ownerAccountID == scope.accountID }
-        guard !localNotes.contains(where: { $0.hasCorruptSyncJournal }) else {
-            throw syncError(-36, "同步清理记录无法解析，已保留数据并阻止删除。")
-        }
+        let accountNotes = try modelContext.fetch(FetchDescriptor<StickyNote>()).filter { $0.ownerAccountID == scope.accountID }
+        // Only the records with an unreadable journal are isolated; they are neither deleted nor trusted.
+        let localNotes = accountNotes.filter { !$0.hasCorruptSyncJournal }
         var ids = pendingRemoteDeletes[scope.accountID] ?? []
-        var unresolved = 0
+        var unresolved = 0 // corrupt-journal records are reported by ensureNoPendingWork, not counted as transient failures
         for note in localNotes {
             if note.recoveryPaused || note.recoveryPendingDeleteID != nil { continue }
             // A replacement whose POST outcome is unknown must not lose its last known old object.
@@ -1027,6 +1026,25 @@ final class SyncEngine {
         context.insert(copy)
         return copy
     }
+    /// S3-C: the candidate's full cloud body is saved locally BEFORE a later PATCH can overwrite it.
+    private func archiveCandidateCloudContent(_ candidate: VerifiedRecoveryCandidate, scope: Scope, context: ModelContext, boundTo sourceID: UUID) -> StickyNote {
+        let props: [[String: Any]] = candidate.webNoteJSON.map { [["id": NoteConverter.webNoteJSONPropertyId, "value": $0]] } ?? []
+        let extracted = NoteConverter.extractNoteColor(fromExtendedProperties: props)
+        let copy = StickyNote(color: extracted.color, content: NoteConverter.extractPlainText(from: candidate.html),
+                              ownerAccountID: scope.accountID, syncStatus: .synced)
+        let attributed = NoteConverter.htmlToAttributedString(candidate.html)
+        copy.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attributed, requiringSecureCoding: true)
+        copy.webNoteJSON = candidate.webNoteJSON
+        copy.recoveryPaused = true; copy.recoveryIsArchive = true
+        var entry = RecoveryAuditEntry(accountID: scope.accountID, action: "cloud-content-snapshot-before-association",
+            reason: "关联前保存候选云端对象的完整正文，之后的本地上传可能覆盖云端；此副本仅本地保留，不会自动上传。",
+            priorOperationID: nil, remoteID: candidate.id, kind: candidate.kind, changeKey: candidate.changeKey,
+            relatedLocalIDs: [sourceID])
+        entry.candidateHTML = candidate.html
+        copy.recoveryAudit = [entry]
+        context.insert(copy)
+        return copy
+    }
     private func retainOldReferences(_ note: StickyNote, except id: String? = nil) {
         var retained = Set(note.recoveryRetainedRemoteIDs + note.pendingCleanupRemoteIDs)
         if let old = note.remoteId, old != id { retained.insert(old) }
@@ -1044,20 +1062,7 @@ final class SyncEngine {
         try requireOwner(note, scope: scope)
         // Export is read-only and allowed even if a journal cannot be parsed; raw journal bytes
         // are added separately so corruption is not silently lost.
-        let content = RecoveryContentExport(formatVersion: 1, localID: note.id, ownerAccountID: note.ownerAccountID,
-            plainText: note.plainTextContent, attributedContentData: note.attributedContentData, audioRecordings: note.audioRecordings,
-            color: note.colorRawValue, createdAt: note.createdAt, modifiedAt: note.modifiedAt,
-            windowFrame: [note.windowX, note.windowY, note.windowWidth, note.windowHeight], remoteID: note.remoteId,
-            changeKey: note.changeKey, webNoteJSON: note.webNoteJSON, isDeletedLocally: note.isDeletedLocally,
-            operationID: note.pendingCreateOperationID, operationEndpoint: note.pendingCreateEndpoint,
-            operationStartedAt: note.pendingCreateStartedAt, retainedRemoteIDs: note.recoveryRetainedRemoteIDs,
-            automaticCleanupRemoteIDs: note.pendingCleanupRemoteIDs, pendingRecoveryDeleteID: note.recoveryPendingDeleteID,
-            pendingRecoveryDeleteKind: note.recoveryPendingDeleteKindRaw, recoveryPaused: note.recoveryPaused, audit: note.recoveryAudit)
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
-        var json = try JSONSerialization.jsonObject(with: encoder.encode(content)) as! [String: Any]
-        json["rawRecoveryAuditBase64"] = note.recoveryAuditData?.base64EncodedString()
-        json["rawRecoveryRetainedIDsBase64"] = note.recoveryRetainedIDsData?.base64EncodedString()
-        json["rawCleanupIDsBase64"] = note.pendingCleanupIDsData?.base64EncodedString()
+        let json = try LocalExporter.noteObject(note)
         return try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
     }
 
@@ -1105,13 +1110,14 @@ final class SyncEngine {
                 throw syncError(-46, "已有本地关联副本含未决操作，需先单独核对；不会静默删除或合并。")
             }
             let archive = archiveRecoverySnapshot(note, scope: scope, context: context)
+            let cloudArchive = archiveCandidateCloudContent(fresh, scope: scope, context: context, boundTo: note.id)
             for duplicate in duplicates {
                 addAudit(duplicate, action: "archive-local-representation", reason: text, scope: scope, candidate: fresh, related: [note.id])
                 duplicate.remoteId = nil; duplicate.changeKey = nil; duplicate.lastSyncedAt = nil
                 duplicate.recoveryPaused = true; duplicate.recoveryIsArchive = true; duplicate.syncStatus = .synced
             }
             addAudit(note, action: "associate-user-attested-exact-object", reason: text, scope: scope, candidate: fresh,
-                     related: [archive.id] + duplicates.map(\.id))
+                     related: [archive.id, cloudArchive.id] + duplicates.map(\.id))
             retainOldReferences(note, except: fresh.id)
             clearCreateIntent(note)
             note.remoteId = fresh.id; note.changeKey = changeKey
@@ -1181,6 +1187,30 @@ final class SyncEngine {
             if !note.isDeleted { note.syncStatus = .error; try saveDurably(note) }
             throw error
         }
+        // The explicit create just produced a definite, journaled object id; the uncertainty that justified the
+        // guard is gone, so later edits must not be stuck on -42 for sessions without ShortNotes (S3-A).
+        if !note.isDeleted, note.pendingCreateOperationID == nil, note.remoteId != nil, note.recoveryBlocksAutomaticRecreate {
+            note.recoveryBlocksAutomaticRecreate = false
+            addAudit(note, action: "clear-recreate-guard-after-confirmed-create", reason: "显式重建已拿到确定的云端对象 ID，解除禁止自动重建标记。", scope: scope)
+            try saveDurably(note)
+        }
+    }
+
+    /// S3-A degradation path: when PATCH on a recovered binding keeps failing (e.g. no ShortNotes), the user may
+    /// explicitly allow the normal create-then-delete replacement for this one note. Local-only, audited.
+    func allowReplacementSync(_ note: StickyNote, reason: String, acknowledged: Bool) throws {
+        let scope = try currentScope()
+        let text = try requireRecoveryConfirmation(reason, acknowledged: acknowledged)
+        try requireOwner(note, scope: scope)
+        guard note.recoveryBlocksAutomaticRecreate else { throw syncError(-46, "此便笺没有「禁止自动重建」标记。") }
+        guard note.pendingCreateOperationID == nil, note.recoveryPendingDeleteID == nil,
+              !note.hasCorruptRecoveryJournal, !note.hasCorruptSyncJournal else {
+            throw syncError(-46, "存在未决的创建/删除核对，不能解除标记。")
+        }
+        addAudit(note, action: "allow-replacement-sync-user-confirmed", reason: text, scope: scope)
+        note.recoveryBlocksAutomaticRecreate = false
+        if note.syncStatus == .error { note.syncStatus = .pendingUpload }
+        try saveDurably(note)
     }
 
     // MARK: - Graph URL Helpers

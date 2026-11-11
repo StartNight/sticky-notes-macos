@@ -37,6 +37,10 @@ targets:
         COMBINE_HIDPI_IMAGES: YES
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "Sticky Notes needs microphone access to record audio notes and dictation."
         INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "Sticky Notes uses speech recognition for dictation input."
+      configs:
+        Release:
+          # Release must not carry the debugger entitlement (com.apple.security.get-task-allow).
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
   # QA: unit-test bundle WITHOUT host app.
   # Hosting would launch the real app, which opens the user's real SwiftData store and
@@ -56,6 +60,7 @@ targets:
       - StickyNotes/Services/NoteConverter.swift
       - StickyNotes/Services/SyncEngine.swift
       - StickyNotes/Services/SyncRecoveryTypes.swift
+      - StickyNotes/Services/AccountIsolationService.swift
       - StickyNotes/Services/TextEditorProxy.swift
       - StickyNotes/Utilities/ColorExtensions.swift
       - StickyNotes/Utilities/KeychainHelper.swift
