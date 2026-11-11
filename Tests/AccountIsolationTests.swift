@@ -28,7 +28,7 @@ final class AccountIsolationTests: XCTestCase {
         XCTAssertEqual(MockURLProtocol.heldCount, 0)
         MockURLProtocol.reset(); URLProtocol.unregisterClass(MockURLProtocol.self)
         defaults.removePersistentDomain(forName: suiteName)
-        container = nil; engine = nil; service = nil
+        container = nil; engine = nil; service = nil; coordinators = []
     }
 
     // MARK: helpers
@@ -513,5 +513,96 @@ final class AccountIsolationTests: XCTestCase {
         auth.isIdentityVerified = true
         XCTAssertNotNil(try service.pendingPrompt(modelContext: context))
         XCTAssertNoThrow(try service.claimLegacy(legacy, to: .currentAccount, modelContext: context))
+    }
+    // MARK: app-level first-login prompt (follow-up #4 Esc ≠ permanent refusal, #5 no list window needed)
+
+    @MainActor final class FakePresenter: AdoptionPromptPresenting {
+        var choice: AdoptionChoice = .skip
+        var queue: [AdoptionChoice] = []          // answers consumed first, then `choice`
+        var shown: [AdoptionPromptInfo] = []
+        var beforeReturn: (() -> Void)?
+        func present(_ info: AdoptionPromptInfo) async -> AdoptionChoice {
+            shown.append(info)
+            let hook = beforeReturn; beforeReturn = nil; hook?()
+            return queue.isEmpty ? choice : queue.removeFirst()
+        }
+    }
+    private var coordinators: [AdoptionPromptCoordinator] = []   // production holds it in a singleton
+    private func coordinator(_ presenter: FakePresenter, accepted: ((ModelContext) -> Void)? = nil) -> AdoptionPromptCoordinator {
+        let c = AdoptionPromptCoordinator(auth: auth, service: service, accountLabel: { "a@example.test" })
+        coordinators.append(c)
+        c.start(context: context, presenter: presenter, afterAccept: { ctx in accepted?(ctx) })
+        return c
+    }
+    private func settle() async { for _ in 0..<20 { await Task.yield(); try? await Task.sleep(nanoseconds: 5_000_000) } }
+
+    func testEscOrNotNowSkipsThisTimeOnlyAndNothingIsRecorded() async throws {
+        let n = add("local", owner: StickyNote.unlinkedOwnerMarker)
+        signIn("A")
+        let p = FakePresenter(); p.choice = .skip          // Esc / close / "Not Now"
+        let c = coordinator(p)
+        await settle()
+        XCTAssertEqual(p.shown.count, 1)
+        XCTAssertEqual(p.shown.first?.count, 1)
+        XCTAssertTrue(service.ledger.decisions(for: "A").isEmpty, "Esc 不得写入任何永久拒绝记录")
+        XCTAssertEqual(n.ownership, .unlinkedLocal)
+        XCTAssertEqual(n.syncStatus, .pendingUpload)       // untouched default
+        await c.evaluate(); await settle()
+        XCTAssertEqual(p.shown.count, 1, "同一次登录内不循环重复询问")
+        // 下次启动（新的协调器）仍会再问
+        let p2 = FakePresenter(); p2.choice = .skip
+        _ = coordinator(p2); await settle()
+        XCTAssertEqual(p2.shown.count, 1, "下次启动/重新登录仍会再次询问")
+        XCTAssertNotNil(try service.pendingPrompt(modelContext: context))
+    }
+
+    func testExplicitDeclineIsRemembered() async throws {
+        let n = add("local", owner: StickyNote.unlinkedOwnerMarker)
+        signIn("A")
+        let p = FakePresenter(); p.choice = .decline
+        _ = coordinator(p); await settle()
+        XCTAssertEqual(service.ledger.decisions(for: "A")[n.id], .declined)
+        XCTAssertEqual(n.ownership, .unlinkedLocal, "拒绝不改动便笺")
+        let p2 = FakePresenter()
+        _ = coordinator(p2); await settle()
+        XCTAssertTrue(p2.shown.isEmpty, "显式拒绝之后不再询问同一批便笺")
+    }
+
+    func testAcceptAdoptsAndTriggersSync() async throws {
+        let n = add("local", owner: StickyNote.unlinkedOwnerMarker)
+        signIn("A")
+        var synced = 0
+        let p = FakePresenter(); p.choice = .accept
+        _ = coordinator(p, accepted: { _ in synced += 1 }); await settle()
+        XCTAssertEqual(n.ownerAccountID, "A")
+        XCTAssertEqual(n.syncStatus, .pendingUpload)
+        XCTAssertEqual(service.ledger.decisions(for: "A")[n.id], .accepted)
+        XCTAssertEqual(synced, 1)
+    }
+
+    func testPromptDoesNotDependOnAnyWindowAndFollowsAuthChangesIncludingVerification() async throws {
+        let n = add("local", owner: StickyNote.unlinkedOwnerMarker)
+        signOut()
+        let p = FakePresenter(); p.choice = .skip
+        _ = coordinator(p); await settle()                 // no view / window exists anywhere in this test
+        XCTAssertTrue(p.shown.isEmpty, "未登录不询问")
+        signIn("A"); auth.isIdentityVerified = false
+        await settle()
+        XCTAssertTrue(p.shown.isEmpty, "身份未复核不询问")
+        auth.isIdentityVerified = true
+        await settle()
+        XCTAssertEqual(p.shown.count, 1, "登录并复核后，即使没有列表窗口也会询问")
+        XCTAssertEqual(n.ownership, .unlinkedLocal)
+    }
+
+    func testStalePromptWhenAccountChangesWhileDialogIsOpenChangesNothing() async throws {
+        let n = add("local", owner: StickyNote.unlinkedOwnerMarker)
+        signIn("A")
+        let p = FakePresenter(); p.queue = [.accept]; p.choice = .skip
+        p.beforeReturn = { [unowned self] in self.signIn("B") }   // user switched account behind the dialog
+        let c = coordinator(p); await settle()
+        XCTAssertEqual(n.ownership, .unlinkedLocal, "过期提示不得把便笺划给另一个账号")
+        XCTAssertNotNil(c.lastError)
+        XCTAssertTrue(service.ledger.decisions(for: "A").isEmpty && service.ledger.decisions(for: "B").isEmpty)
     }
 }

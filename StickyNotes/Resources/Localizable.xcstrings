@@ -3002,6 +3002,38 @@
           }
         }
       }
+    },
+    "%@ note(s) were created while signed out: %@. Nothing is merged or uploaded until you confirm. “Keep as No-Account Notes” stops asking about these notes; “Not Now” (or Esc) only skips this time and asks again next time.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ note(s) were created while signed out: %@. Nothing is merged or uploaded until you confirm. “Keep as No-Account Notes” stops asking about these notes; “Not Now” (or Esc) only skips this time and asks again next time."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 条便笺是在未登录时创建的：%@。在您确认之前不会合并或上传。“保留为无账号便笺”会不再询问这些便笺；“暂不”（或按 Esc）只是本次跳过，下次仍会询问。"
+          }
+        }
+      }
+    },
+    "Keep as No-Account Notes": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep as No-Account Notes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保留为无账号便笺"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

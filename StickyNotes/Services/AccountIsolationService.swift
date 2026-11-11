@@ -89,10 +89,17 @@ final class AccountIsolationService {
         return count
     }
 
-    /// Declining changes nothing in the store: notes stay no-account data.
+    /// EXPLICIT decline ("Keep as No-Account Notes"): changes nothing in the store, and remembers not to ask again
+    /// about these notes for this account. Esc / closing the dialog / "Not Now" must NOT come here — see `skip`.
     func decline(_ prompt: AdoptionPrompt) throws {
         try requireCurrent(prompt)
         ledger.record(prompt.noteIDs, .declined, for: prompt.accountID)
+    }
+
+    /// "Not Now", Esc, or closing the dialog: skip for this time only. Records nothing and changes nothing, so the
+    /// same notes are offered again the next time this account signs in / the app starts.
+    func skip(_ prompt: AdoptionPrompt) {
+        // Deliberately empty: a dismissal is not a decision.
     }
 
     /// Settings entry (always available while signed in & verified).
@@ -215,5 +222,105 @@ enum StoreSafetyBackup {
             created.append(target)
         }
         return created
+    }
+}
+
+
+// MARK: - App-level first-sign-in prompt (not tied to any window)
+
+enum AdoptionChoice: Equatable {
+    case accept      // "Sync to This Account"
+    case decline     // explicit "Keep as No-Account Notes" -> remembered
+    case skip        // "Not Now" / Esc / close -> asked again next time
+}
+
+struct AdoptionPromptInfo: Equatable {
+    let accountLabel: String
+    let count: Int
+    let titles: [String]
+}
+
+@MainActor
+protocol AdoptionPromptPresenting: AnyObject {
+    /// Must return `.skip` for Esc/close. Must work with no window on screen.
+    func present(_ info: AdoptionPromptInfo) async -> AdoptionChoice
+}
+
+/// Owns "when do we ask about no-account notes". It observes the auth state itself instead of living inside the
+/// notes-list view, so the question is asked even if the list window was closed or never shown (floating note
+/// windows only), and the dialog is an app-level alert, not part of any window's view tree.
+@MainActor
+final class AdoptionPromptCoordinator {
+    static let shared = AdoptionPromptCoordinator()
+
+    private let auth: any SyncAuthProviding
+    private let service: AccountIsolationService
+    private var presenter: (any AdoptionPromptPresenting)?
+    private var context: ModelContext?
+    private var afterAccept: (@MainActor (ModelContext) async -> Void)?
+    private var accountLabel: () -> String
+    private var started = false
+    private var evaluating = false
+    /// Prompts already answered or skipped in this login session (account + generation): never re-asked in a loop.
+    private var handled: Set<String> = []
+    private(set) var lastError: String?
+
+    init(auth: any SyncAuthProviding = AuthManager.shared, service: AccountIsolationService = .shared,
+         accountLabel: @escaping () -> String = { "this account" }) {
+        self.auth = auth
+        self.service = service
+        self.accountLabel = accountLabel
+    }
+
+    func start(context: ModelContext, presenter: any AdoptionPromptPresenting,
+               accountLabel: (() -> String)? = nil,
+               afterAccept: (@MainActor (ModelContext) async -> Void)? = nil) {
+        guard !started else { return }
+        started = true
+        self.context = context
+        self.presenter = presenter
+        self.afterAccept = afterAccept
+        if let accountLabel { self.accountLabel = accountLabel }
+        Task { await self.evaluate(); self.arm() }
+    }
+
+    private func arm() {
+        withObservationTracking {
+            _ = auth.activeScope
+            _ = auth.isIdentityVerified
+            _ = auth.sessionGeneration
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.evaluate()
+                self.arm()
+            }
+        }
+    }
+
+    /// Ask about every pending no-account note set, one dialog at a time, until nothing new is pending.
+    func evaluate() async {
+        guard !evaluating, let context, let presenter else { return }
+        evaluating = true
+        defer { evaluating = false }
+        while let prompt = try? service.pendingPrompt(modelContext: context) {
+            let key = "\(prompt.accountID)|\(prompt.generation.uuidString)"
+            guard !handled.contains(key) else { return }
+            handled.insert(key)
+            let notes = (try? context.fetch(FetchDescriptor<StickyNote>())) ?? []
+            let titles = notes.filter { prompt.noteIDs.contains($0.id) }.prefix(3).map(\.title)
+            let choice = await presenter.present(AdoptionPromptInfo(accountLabel: accountLabel(), count: prompt.noteIDs.count, titles: titles))
+            do {
+                switch choice {
+                case .accept:
+                    try service.accept(prompt, modelContext: context)
+                    await afterAccept?(context)
+                case .decline: try service.decline(prompt)
+                case .skip: service.skip(prompt)
+                }
+            } catch {
+                lastError = error.localizedDescription   // stale prompt (signed out/switched while open): nothing changed
+            }
+        }
     }
 }

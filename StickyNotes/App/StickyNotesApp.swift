@@ -37,6 +37,18 @@ struct StickyNotesApp: App {
     @State private var activeWindowTracker = ActiveWindowTracker()
     @Environment(\.openWindow) private var openWindow
 
+    init() {
+        // App-level, independent of whether the notes-list window exists: asks about no-account notes once the
+        // account identity is verified (see AdoptionPromptCoordinator).
+        let context = sharedContainer.mainContext
+        AdoptionPromptCoordinator.shared.start(
+            context: context,
+            presenter: AppKitAdoptionPromptPresenter(),
+            accountLabel: { AuthManager.shared.userEmail ?? AuthManager.shared.userName ?? String(localized: "this account") },
+            afterAccept: { context in await SyncEngine.shared.syncAll(modelContext: context) }
+        )
+    }
+
     let sharedContainer: ModelContainer = {
         let schema = Schema([StickyNote.self])
         // Use the sandboxed container path so we keep existing notes data

@@ -17,10 +17,6 @@ struct NotesListView: View {
     @AppStorage("confirmBeforeDelete") private var confirmBeforeDelete = true
     @AppStorage("followActiveApp") private var followActiveApp = true
 
-    @State private var adoptionPrompt: AccountIsolationService.AdoptionPrompt?
-    @State private var showAdoptionAlert = false
-    @State private var adoptionError: String?
-
     /// Strict account isolation: list and search only ever see the active scope.
     private var scope: ActiveScope { authManager.activeScope }
 
@@ -62,19 +58,12 @@ struct NotesListView: View {
                 await syncEngine.syncAll(modelContext: modelContext)
             }
         }
-        .task(id: scope) { refreshAdoptionPrompt() }
         .onChange(of: scope) { _, newScope in applyScopeChange(newScope) }
         .alert(String(localized: "Keychain access needed"), isPresented: Binding(get: { authManager.needsKeychainExplanation }, set: { _ in })) {
             Button(String(localized: "Continue")) { Task { await authManager.confirmKeychainAccess() } }
             Button(String(localized: "Not Now"), role: .cancel) { authManager.declineKeychainAccess() }
         } message: {
             Text(String(localized: "macOS may show the keychain prompt twice. Please choose Always Allow both times. Choosing Deny or Cancel deletes nothing, and the app will not ask again until you restart it."))
-        }
-        .alert(adoptionTitle, isPresented: $showAdoptionAlert) {
-            Button(String(localized: "Sync to This Account")) { resolveAdoption(accept: true) }
-            Button(String(localized: "Not Now (Keep as No-Account Notes)"), role: .cancel) { resolveAdoption(accept: false) }
-        } message: {
-            Text(adoptionMessage)
         }
         .onReceive(NotificationCenter.default.publisher(for: .requestModelContextSync)) { _ in
             Task {
@@ -92,36 +81,7 @@ struct NotesListView: View {
         }
     }
 
-    private var adoptionTitle: String {
-        let who = authManager.userEmail ?? authManager.userName ?? String(localized: "this account")
-        return String(localized: "Sync no-account notes to \(who)?")
-    }
-
-    private var adoptionMessage: String {
-        guard let prompt = adoptionPrompt else { return "" }
-        let titles = Array(notes).filter { prompt.noteIDs.contains($0.id) }.prefix(3).map(\.title).joined(separator: ", ")
-        let count = String(prompt.noteIDs.count)
-        return String(localized: "\(count) note(s) were created while signed out: \(titles). Nothing is merged or uploaded until you confirm. If you decline they stay as local no-account notes.")
-    }
-
-    private func refreshAdoptionPrompt() {
-        guard !showAdoptionAlert else { return }
-        adoptionPrompt = try? AccountIsolationService.shared.pendingPrompt(modelContext: modelContext)
-        showAdoptionAlert = adoptionPrompt != nil
-    }
-
-    private func resolveAdoption(accept: Bool) {
-        guard let prompt = adoptionPrompt else { return }
-        adoptionPrompt = nil
-        do {
-            if accept {
-                try AccountIsolationService.shared.accept(prompt, modelContext: modelContext)
-                Task { await syncEngine.syncAll(modelContext: modelContext) }
-            } else {
-                try AccountIsolationService.shared.decline(prompt)
-            }
-        } catch { adoptionError = error.localizedDescription }
-    }
+    // The first-sign-in adoption question lives in AdoptionPromptCoordinator (app level, window-independent).
 
     /// Windows follow the scope: out-of-scope note windows close (their isOpen flag is kept), and windows of
     /// notes that were open when this scope was last active come back.
