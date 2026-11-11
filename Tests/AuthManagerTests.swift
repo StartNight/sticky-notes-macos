@@ -1,6 +1,12 @@
 import XCTest
 import Security
 import AuthenticationServices
+import SwiftData
+
+final class FakeClock {
+    var date = Date(timeIntervalSince1970: 1_800_000_000)
+    func advance(_ seconds: TimeInterval) { date = date.addingTimeInterval(seconds) }
+}
 
 @MainActor
 final class AuthManagerTests: XCTestCase {
@@ -420,5 +426,144 @@ final class AuthManagerTests: XCTestCase {
         try await auth.signIn()
         XCTAssertTrue(auth.isIdentityVerified)
         XCTAssertEqual(auth.activeScope, .account("fake-C"))
+    }
+    // MARK: Token refresh: sequential coalescing + backoff (follow-up #6)
+
+    private func expiredStore() -> FakeKeychainBackend {
+        let backend = FakeKeychainBackend()
+        backend.seed(["ms_access_token": "fake-access", "ms_refresh_token": "fake-refresh", "ms_token_expiry": "1",
+                      "ms_graph_account_id": "fake-A", "ms_user_email": "a@example.test", "ms_user_name": "A"])
+        return backend
+    }
+    private func tokenReply(expires: Double = 3600) -> MockURLProtocol.Reply {
+        .http(status: 200, json: ["access_token": "fake-new", "refresh_token": "fake-refresh-new", "expires_in": expires])
+    }
+
+    func testSequentialRefreshRequestsWithinCooldownShareOneNetworkCall() async throws {
+        let clock = FakeClock()
+        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults,
+                               verifyIdentityAfterRestore: false, now: { clock.date })
+        await auth.waitForRestore()
+        MockURLProtocol.handler = { [self] _ in tokenReply() }
+        let first = try await auth.refreshTokens()
+        // e.g. the next note's PATCH also returned 403 a second later in the same sync pass
+        clock.advance(2)
+        let second = try await auth.refreshTokens()
+        clock.advance(3)
+        let third = try await auth.refreshTokens()
+        XCTAssertEqual([first, second, third], ["fake-new", "fake-new", "fake-new"])
+        XCTAssertEqual(MockURLProtocol.requests.count, 1, "冷却期内的连续刷新只发一次网络请求")
+        XCTAssertEqual(auth.refreshNetworkCallCount, 1)
+        clock.advance(61)
+        _ = try await auth.refreshTokens()
+        XCTAssertEqual(MockURLProtocol.requests.count, 2, "冷却期过后仍能真正刷新")
+    }
+
+    func testShortLivedTokenDoesNotCauseARefreshOnEveryAccess() async throws {
+        let clock = FakeClock()
+        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults,
+                               verifyIdentityAfterRestore: false, now: { clock.date })
+        await auth.waitForRestore()
+        MockURLProtocol.handler = { [self] _ in tokenReply(expires: 120) }   // inside the 5-minute early-refresh window
+        for _ in 0..<5 { _ = try await auth.getValidAccessToken(); clock.advance(1) }
+        XCTAssertEqual(MockURLProtocol.requests.count, 1)
+    }
+
+    func testFailedRefreshBacksOffExponentiallyAndRecovers() async throws {
+        let clock = FakeClock()
+        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults,
+                               verifyIdentityAfterRestore: false, now: { clock.date })
+        await auth.waitForRestore()
+        MockURLProtocol.handler = { _ in .failure(.notConnectedToInternet) }
+        func attempt(expecting code: Int? = nil, line: UInt = #line) async {
+            do { _ = try await auth.refreshTokens(); XCTFail("应失败", line: line) }
+            catch { if let code { XCTAssertEqual((error as NSError).code, code, line: line) } }
+        }
+        await attempt(); XCTAssertEqual(MockURLProtocol.requests.count, 1)
+        XCTAssertTrue(auth.isAuthenticated, "网络失败不等于登出")
+        await attempt(expecting: -16); XCTAssertEqual(MockURLProtocol.requests.count, 1)
+        clock.advance(31)                                              // 30s base elapsed
+        await attempt(); XCTAssertEqual(MockURLProtocol.requests.count, 2)
+        clock.advance(31)                                              // second failure doubles to 60s
+        await attempt(expecting: -16); XCTAssertEqual(MockURLProtocol.requests.count, 2)
+        clock.advance(30)
+        await attempt(); XCTAssertEqual(MockURLProtocol.requests.count, 3)
+        // 恢复：成功后清除退避，并进入冷却合并
+        MockURLProtocol.handler = { [self] _ in tokenReply() }
+        clock.advance(121)
+        let token = try await auth.refreshTokens()
+        XCTAssertEqual(token, "fake-new"); XCTAssertEqual(MockURLProtocol.requests.count, 4)
+        let again = try await auth.refreshTokens()
+        XCTAssertEqual(again, "fake-new"); XCTAssertEqual(MockURLProtocol.requests.count, 4)
+    }
+
+    func testBackoffIsCappedAndRejectedTokenStillSignsOutImmediately() async throws {
+        let clock = FakeClock()
+        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults,
+                               verifyIdentityAfterRestore: false, now: { clock.date })
+        await auth.waitForRestore()
+        MockURLProtocol.handler = { _ in .failure(.timedOut) }
+        for _ in 0..<12 { _ = try? await auth.refreshTokens(); clock.advance(1000) }
+        let before = MockURLProtocol.requests.count
+        clock.advance(AuthManager.refreshBackoffCap + 1)
+        _ = try? await auth.refreshTokens()
+        XCTAssertEqual(MockURLProtocol.requests.count, before + 1, "退避上限 \(AuthManager.refreshBackoffCap)s，超过后一定会重试")
+        MockURLProtocol.handler = { _ in .http(status: 400, json: [:]) }
+        clock.advance(2000)
+        _ = try? await auth.refreshTokens()
+        XCTAssertFalse(auth.isAuthenticated, "令牌被拒绝仍立即失效（不受退避影响）")
+    }
+
+    // 真实 AuthManager + SyncEngine：一次同步里多条便笺各自 403（缺 ShortNotes）曾各触发一次令牌刷新。
+    private func perNote403Storm(cooldown: TimeInterval) async throws -> (tokenCalls: Int, uploaded: Int) {
+        let store = KeychainHelper(inMemoryOnly: true)
+        store.update(strings: ["ms_access_token": "fake-access", "ms_refresh_token": "fake-refresh", "ms_token_expiry": "9999999999",
+                               "ms_graph_account_id": "acct-A", "ms_user_email": "a@example.test", "ms_user_name": "A"])
+        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false, refreshCooldown: cooldown)
+        await auth.waitForRestore()
+        let schema = Schema([StickyNote.self])
+        let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
+        let context = container.mainContext
+        var notes: [StickyNote] = []
+        for i in 1...3 {
+            let n = StickyNote(content: "note \(i)", remoteId: "R\(i)", ownerAccountID: "acct-A", changeKey: "ck\(i)")
+            n.syncStatus = .pendingUpload
+            context.insert(n); notes.append(n)
+        }
+        try context.save()
+        let created = Counter()
+        MockURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if request.url?.host == "login.microsoftonline.com" {
+                return .http(status: 200, json: ["access_token": "fake-new-\(UUID().uuidString.prefix(4))", "expires_in": 3600])
+            }
+            switch (request.httpMethod ?? "GET", path) {
+            case ("GET", "/v1.0/me"): return .http(status: 200, json: ["id": "acct-A", "displayName": "A", "mail": "a@example.test"])
+            case ("GET", _): return .http(status: 200, json: ["value": []])
+            case ("PATCH", _): return .http(status: 403, json: ["error": "forbidden"])
+            case ("POST", _):
+                let n = created.next()
+                return .http(status: 201, json: ["id": "new-\(n)", "changeKey": "ckn\(n)", "body": ["contentType": "html", "content": "x"]])
+            default: return .http(status: 204, json: nil)
+            }
+        }
+        _ = try await auth.ensureAccountID()
+        let engine = SyncEngine(authManager: auth, debounceNanoseconds: 1_000_000)
+        await engine.syncAll(modelContext: context)
+        let tokenCalls = MockURLProtocol.requests.filter { $0.url.host == "login.microsoftonline.com" }.count
+        return (tokenCalls, notes.filter { $0.remoteId?.hasPrefix("new-") == true }.count)
+    }
+    final class Counter { private var n = 0; func next() -> Int { n += 1; return n } }
+
+    func testWithoutCooldownEveryNote403TriggersItsOwnRefresh_RootCauseOfTheBurst() async throws {
+        let result = try await perNote403Storm(cooldown: 0)
+        XCTAssertEqual(result.uploaded, 3)
+        XCTAssertGreaterThanOrEqual(result.tokenCalls, 3, "根因复现：每条便笺的 403 各自触发一次刷新")
+    }
+
+    func testPerNote403StormNowRefreshesOnlyOnce() async throws {
+        let result = try await perNote403Storm(cooldown: 60)
+        XCTAssertEqual(result.uploaded, 3, "同步行为不变：三条仍走回退创建并成功")
+        XCTAssertEqual(result.tokenCalls, 1, "冷却内合并为一次刷新")
     }
 }

@@ -94,6 +94,17 @@ final class AuthManager: NSObject, SyncAuthProviding {
     private(set) var identityMismatch = false
     private(set) var identityVerificationTask: Task<Void, Never>?
     private let verifyIdentityAfterRestore: Bool
+
+    // Refresh throttling (follow-up #6). `refreshTask` already merges CONCURRENT calls; these merge SEQUENTIAL ones.
+    private let now: () -> Date
+    /// A 401/403 right after a successful refresh is not token expiry; reuse the fresh token instead of refreshing again.
+    let refreshCooldown: TimeInterval
+    private var lastRefreshSuccess: Date?
+    private var refreshFailureCount = 0
+    private var refreshBackoffUntil: Date?
+    static let refreshBackoffBase: TimeInterval = 30
+    static let refreshBackoffCap: TimeInterval = 900
+    private(set) var refreshNetworkCallCount = 0
     private(set) var sessionGeneration = UUID()
     private var refreshTask: Task<String, Error>?
     private var identityTask: Task<String, Error>?
@@ -123,8 +134,11 @@ final class AuthManager: NSObject, SyncAuthProviding {
     private let kUserName = "ms_user_name"
 
     init(keychain: KeychainHelper = .shared, defaults: UserDefaults = .standard,
-         network: URLSession = .shared, loadStoredAuth: Bool = true, verifyIdentityAfterRestore: Bool = true) {
+         network: URLSession = .shared, loadStoredAuth: Bool = true, verifyIdentityAfterRestore: Bool = true,
+         refreshCooldown: TimeInterval = 60, now: @escaping () -> Date = Date.init) {
         self.verifyIdentityAfterRestore = verifyIdentityAfterRestore
+        self.refreshCooldown = refreshCooldown
+        self.now = now
         self.keychain = keychain
         self.defaults = defaults
         self.network = network
@@ -248,6 +262,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
         accountID = nil
         identityVerified = false
         identityMismatch = false
+        resetRefreshThrottle()
         isAuthenticated = false
         isAuthenticating = true
         lastAuthError = nil
@@ -420,6 +435,17 @@ final class AuthManager: NSObject, SyncAuthProviding {
             try requireGeneration(generation)
             return token
         }
+        // Sequential callers (e.g. one 403 per note in a single sync pass) share the refresh that just succeeded.
+        if let last = lastRefreshSuccess, now().timeIntervalSince(last) < refreshCooldown,
+           let token = keychain.readString(key: kAccessToken), !token.isEmpty {
+            NSLog("AUTH_FLOW phase=refresh-coalesced")
+            return token
+        }
+        // After a failed refresh (offline, 5xx, keychain write failure) wait out an exponential backoff.
+        if let until = refreshBackoffUntil, now() < until {
+            NSLog("AUTH_FLOW phase=refresh-backoff")
+            throw NSError(domain: "AuthManager", code: -16, userInfo: [NSLocalizedDescriptionKey: "令牌刷新刚失败过，稍后自动重试（退避中）。"])
+        }
         let task = Task { try await self.performRefresh(generation: generation) }
         refreshTask = task
         defer { if generation == sessionGeneration { refreshTask = nil } }
@@ -429,6 +455,33 @@ final class AuthManager: NSObject, SyncAuthProviding {
     }
 
     private func performRefresh(generation: UUID) async throws -> String {
+        refreshNetworkCallCount += 1
+        do {
+            let token = try await performRefreshRequest(generation: generation)
+            if sessionGeneration == generation {
+                lastRefreshSuccess = now()
+                refreshFailureCount = 0
+                refreshBackoffUntil = nil
+            }
+            return token
+        } catch {
+            // Cancellation (sign-out/sign-in) is not a failure; a rejected token already invalidated the session.
+            if sessionGeneration == generation, isAuthenticated, !(error is CancellationError) {
+                refreshFailureCount += 1
+                let delay = min(Self.refreshBackoffBase * pow(2, Double(refreshFailureCount - 1)), Self.refreshBackoffCap)
+                refreshBackoffUntil = now().addingTimeInterval(delay)
+            }
+            throw error
+        }
+    }
+
+    private func resetRefreshThrottle() {
+        lastRefreshSuccess = nil
+        refreshFailureCount = 0
+        refreshBackoffUntil = nil
+    }
+
+    private func performRefreshRequest(generation: UUID) async throws -> String {
         NSLog("AUTH_FLOW phase=refresh")
         try Task.checkCancellation()
         try requireGeneration(generation)
@@ -569,6 +622,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
         accountID = nil
         identityVerified = false
         identityMismatch = false
+        resetRefreshThrottle()
         userEmail = nil
         userName = nil
     }
