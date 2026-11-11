@@ -35,17 +35,21 @@
 		6D71A63DB6B552E6182DAD52 /* NoteTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F31518A3998CC795578F7B8 /* NoteTextEditor.swift */; };
 		733E020D3F886A45FF890F45 /* WindowAccessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEF7E171627D81943B9AF5E1 /* WindowAccessor.swift */; };
 		763F8917DE678E36068076BC /* AccountMigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6FC42E3045208E8D471AC698 /* AccountMigrationTests.swift */; };
+		781A7540948F3A825147FBE4 /* SyncRecoveryTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7ACC13492BAC756DF06FD1 /* SyncRecoveryTypes.swift */; };
+		7B1C9F74131BE16823097672 /* SyncRecoveryTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7ACC13492BAC756DF06FD1 /* SyncRecoveryTypes.swift */; };
 		7B5A35F39F2C3202EE6CFBD6 /* NoteColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC75B15DB7993FBDBF019F5C /* NoteColor.swift */; };
 		7CE0B7E1CB97A13B9080ADA6 /* NoteConverter.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC64E0327C1C6DD99B7D8A27 /* NoteConverter.swift */; };
 		7D3F027AF4546422847A0E24 /* NoteCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 973FCD5349C50EA2134BE259 /* NoteCardView.swift */; };
 		82BE9B99AAAA1FA0EC6BE186 /* MockURLProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A496A9BF8CC8AEEF8DFDE0E3 /* MockURLProtocol.swift */; };
 		873DFB71DD9E9631A820B59B /* NoteColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC75B15DB7993FBDBF019F5C /* NoteColor.swift */; };
+		8A85486AD7F26E757029E4E4 /* RecoveryWorkflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 035CB8DAB33F83137FC5D3ED /* RecoveryWorkflowTests.swift */; };
 		8DDC802A43650C3F8D2F9A32 /* NoteConverterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76201D35267BB20671F1A2B0 /* NoteConverterTests.swift */; };
 		9297786BBF8828017F51638D /* AuthManagerStub.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBEE93EADE345D094471921E /* AuthManagerStub.swift */; };
 		9D79F23ACC031929FB318A9C /* SearchBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52D260DC782A81409FDFA6CA /* SearchBar.swift */; };
 		9D9B6F518E852E952AE46688 /* NoteToolbarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4723B0D0D563B40BF0AD7211 /* NoteToolbarView.swift */; };
 		9EB6DECB906FCAE9D2181AD6 /* StickyNotesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA8553FD88D4A235710062D6 /* StickyNotesApp.swift */; };
 		A2242261379A451978ADE573 /* TodoAndFormattingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E16EA5B0E513A7F567622BA9 /* TodoAndFormattingTests.swift */; };
+		A483D5B2D6D5DE921AE95270 /* RecoveryReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E88AFFB69144B3927F91AE6C /* RecoveryReviewView.swift */; };
 		B2FCE2FDD0DE51306A474793 /* FakeKeychainBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3898B713A09EBE943EB5257E /* FakeKeychainBackend.swift */; };
 		B3D8797DA5D1A7E06A8FE811 /* SyncJournalPersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCA1A39B05845947F0745F06 /* SyncJournalPersistenceTests.swift */; };
 		B77027D57901D13FAAF2302D /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1160D0223842AEC1A73B5D /* AuthManager.swift */; };
@@ -62,6 +66,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		035CB8DAB33F83137FC5D3ED /* RecoveryWorkflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryWorkflowTests.swift; sourceTree = "<group>"; };
 		0452B406919C274FD81269F9 /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
 		0C0ECA073AFAF251A3B94B45 /* SpeechRecognizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechRecognizer.swift; sourceTree = "<group>"; };
 		1C430675DDF145051A7C5A15 /* TextEditorProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextEditorProxy.swift; sourceTree = "<group>"; };
@@ -93,6 +98,7 @@
 		AF700D3EC8736E43B53FA39F /* SyncLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncLifecycleTests.swift; sourceTree = "<group>"; };
 		BE343E8B78ABF1CA38745D9C /* AudioRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRecorder.swift; sourceTree = "<group>"; };
 		C11C6A92A9A4E6800C1BBE9C /* SyncEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncEngineTests.swift; sourceTree = "<group>"; };
+		CF7ACC13492BAC756DF06FD1 /* SyncRecoveryTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncRecoveryTypes.swift; sourceTree = "<group>"; };
 		D2162122D48048E4E42BB620 /* ActiveWindowTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveWindowTracker.swift; sourceTree = "<group>"; };
 		D64B4B5262F2E21AD8BD436E /* AuthManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManagerTests.swift; sourceTree = "<group>"; };
 		D7217EF20296DFC6B0BC4020 /* FormattingBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormattingBar.swift; sourceTree = "<group>"; };
@@ -103,6 +109,7 @@
 		E03440D2E98E2EB7FA1E3381 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		E16E1E5FFD0404DE5003DD35 /* StickyNotesTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StickyNotesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E16EA5B0E513A7F567622BA9 /* TodoAndFormattingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TodoAndFormattingTests.swift; sourceTree = "<group>"; };
+		E88AFFB69144B3927F91AE6C /* RecoveryReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryReviewView.swift; sourceTree = "<group>"; };
 		E9BA370A56E35BAFA9D72BA5 /* KeychainHelperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelperTests.swift; sourceTree = "<group>"; };
 		EE586DF508DB92410B58BAD5 /* NoteWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteWindowView.swift; sourceTree = "<group>"; };
 		F4B0246E19DA367FD032A382 /* LocalizationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalizationTests.swift; sourceTree = "<group>"; };
@@ -158,6 +165,7 @@
 		507C38355EABEFD12AA6F193 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				E88AFFB69144B3927F91AE6C /* RecoveryReviewView.swift */,
 				6D4BAD512EEAEF4442394B01 /* SettingsView.swift */,
 				FEF7E171627D81943B9AF5E1 /* WindowAccessor.swift */,
 			);
@@ -174,6 +182,7 @@
 				5BCAE7EFA1C2253248CAF8D2 /* NoteColorTests.swift */,
 				76201D35267BB20671F1A2B0 /* NoteConverterTests.swift */,
 				4830B1D85A26E9B524E3F8C7 /* NoteEditorPasteTests.swift */,
+				035CB8DAB33F83137FC5D3ED /* RecoveryWorkflowTests.swift */,
 				613B306465E5A42CC99145AF /* StickyNoteModelTests.swift */,
 				C11C6A92A9A4E6800C1BBE9C /* SyncEngineTests.swift */,
 				DCA1A39B05845947F0745F06 /* SyncJournalPersistenceTests.swift */,
@@ -254,6 +263,7 @@
 				DC64E0327C1C6DD99B7D8A27 /* NoteConverter.swift */,
 				0C0ECA073AFAF251A3B94B45 /* SpeechRecognizer.swift */,
 				99EB2DAAA32B0B1722721AE5 /* SyncEngine.swift */,
+				CF7ACC13492BAC756DF06FD1 /* SyncRecoveryTypes.swift */,
 				1C430675DDF145051A7C5A15 /* TextEditorProxy.swift */,
 				AA4CAE13354C9E6012AA1457 /* WindowManager.swift */,
 			);
@@ -371,12 +381,14 @@
 				F6DFDE2465418B0865C9ED90 /* NoteConverter.swift in Sources */,
 				8DDC802A43650C3F8D2F9A32 /* NoteConverterTests.swift in Sources */,
 				56E19520CB23415AE02DE919 /* NoteEditorPasteTests.swift in Sources */,
+				8A85486AD7F26E757029E4E4 /* RecoveryWorkflowTests.swift in Sources */,
 				FFAF6B8F1A44E2FC6BB96864 /* StickyNote.swift in Sources */,
 				447B40EBE364DFC448BE735D /* StickyNoteModelTests.swift in Sources */,
 				1E31A5F3DAFF2C121AA6ACDA /* SyncEngine.swift in Sources */,
 				1BA00FFC9B0B2C5758E8D720 /* SyncEngineTests.swift in Sources */,
 				B3D8797DA5D1A7E06A8FE811 /* SyncJournalPersistenceTests.swift in Sources */,
 				EE39C834FAC44661CE98B961 /* SyncLifecycleTests.swift in Sources */,
+				7B1C9F74131BE16823097672 /* SyncRecoveryTypes.swift in Sources */,
 				184EE3D5AE8398F2EEBD7247 /* TextEditorProxy.swift in Sources */,
 				A2242261379A451978ADE573 /* TodoAndFormattingTests.swift in Sources */,
 			);
@@ -403,12 +415,14 @@
 				9D9B6F518E852E952AE46688 /* NoteToolbarView.swift in Sources */,
 				6D1189EDC4760413991B21D0 /* NoteWindowView.swift in Sources */,
 				5ED177517D5612505D58BCD0 /* NotesListView.swift in Sources */,
+				A483D5B2D6D5DE921AE95270 /* RecoveryReviewView.swift in Sources */,
 				9D79F23ACC031929FB318A9C /* SearchBar.swift in Sources */,
 				C5F5AFD2B4CEF7F365C2304B /* SettingsView.swift in Sources */,
 				FD4F353C40F7EE25B249CEDD /* SpeechRecognizer.swift in Sources */,
 				D8EB2F04D85F640DB8EAAAD8 /* StickyNote.swift in Sources */,
 				9EB6DECB906FCAE9D2181AD6 /* StickyNotesApp.swift in Sources */,
 				D796567F41C6AC712BE69AEF /* SyncEngine.swift in Sources */,
+				781A7540948F3A825147FBE4 /* SyncRecoveryTypes.swift in Sources */,
 				D60D810A51DE1054F08D098C /* TextEditorProxy.swift in Sources */,
 				2DF20E09E4B01844DBDD5D61 /* URLDetector.swift in Sources */,
 				733E020D3F886A45FF890F45 /* WindowAccessor.swift in Sources */,

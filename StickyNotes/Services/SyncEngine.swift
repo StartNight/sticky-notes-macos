@@ -34,6 +34,7 @@ final class SyncEngine {
 
     // MARK: - State
     var state: EngineState = .idle
+    var incompleteTaskCount = 0
     var lastSyncDate: Date? {
         get {
             let timestamp = UserDefaults.standard.double(forKey: lastSyncKey)
@@ -51,6 +52,8 @@ final class SyncEngine {
     private let authManager: any SyncAuthProviding
     private let graphEndpoint = "https://graph.microsoft.com/v1.0"
     private var debounceTasks: [UUID: Task<Void, Never>] = [:]
+    private var debounceTokens: [UUID: UUID] = [:]
+    private(set) var activeScheduledPushCount = 0
     private var periodicTimer: Timer?
     private let debounceNanoseconds: UInt64
     private var fullSyncRunning = false
@@ -96,6 +99,8 @@ final class SyncEngine {
         try validate(scope)
         guard !note.isDeleted, !note.isDeletedLocally else { throw syncError(-32, "便笺已删除，停止上传。") }
         try requireOwner(note, scope: scope)
+        guard !note.recoveryPaused, note.recoveryPendingDeleteID == nil else { throw syncError(-40, "此便笺已暂停，需在待核对清单明确恢复。") }
+        guard !note.hasCorruptRecoveryJournal else { throw syncError(-41, "恢复日志无法解析，已保留原始数据。") }
         guard !note.hasCorruptSyncJournal else { throw syncError(-36, "同步清理记录无法解析，已保留数据并阻止自动写入。") }
         guard note.pendingCreateOperationID == nil else {
             throw syncError(-30, "创建结果待确认：内容已保留，已阻止自动重建；请先核对云端对象，勿盲目重试。")
@@ -105,6 +110,7 @@ final class SyncEngine {
     func prepareForDeletion(_ note: StickyNote, modelContext: ModelContext) throws {
         debounceTasks[note.id]?.cancel()
         debounceTasks.removeValue(forKey: note.id)
+        debounceTokens.removeValue(forKey: note.id)
         let previousDeleted = note.isDeletedLocally
         let previousStatus = note.syncStatus
         note.isDeletedLocally = true
@@ -225,17 +231,20 @@ final class SyncEngine {
             try await pullNotes(token: token, modelContext: modelContext, scope: scope)
             // 2. Push pending local changes
             try await pushPendingNotes(token: token, modelContext: modelContext, scope: scope)
-            try await pushPendingDeletes(token: token, modelContext: modelContext, scope: scope)
+            _ = try await pushPendingDeletes(token: token, modelContext: modelContext, scope: scope)
             try validate(scope)
             try ensureNoPendingWork(modelContext: modelContext, scope: scope)
 
+            self.incompleteTaskCount = 0
             self.state = .idle
             self.lastSyncDate = Date()
         } catch is CancellationError {
             return
         } catch {
             print("Sync failed: code=\((error as NSError).code)")
-            self.state = .error(error.localizedDescription)
+            let scope = try? currentScope()
+            incompleteTaskCount = max(1, scope.map { problemCount(modelContext: modelContext, scope: $0) } ?? 1)
+            self.state = .error("尚有 \(incompleteTaskCount) 项未完成：" + error.localizedDescription)
         }
     }
 
@@ -322,7 +331,7 @@ final class SyncEngine {
             if let localNote = existingLocal {
                 // An unresolved POST may have committed. Keep its original content/metadata frozen
                 // for explicit reconciliation; don't turn it into an auto-uploadable conflict copy.
-                if localNote.pendingCreateOperationID != nil { continue }
+                if localNote.pendingCreateOperationID != nil || localNote.recoveryPaused || localNote.recoveryPendingDeleteID != nil || localNote.hasCorruptRecoveryJournal { continue }
                 // Note exists locally
                 if localNote.changeKey == changeKey {
                     // Still cache `_Note` JSON so a later color-only upload can merge into it.
@@ -332,6 +341,15 @@ final class SyncEngine {
                     continue
                 }
 
+                // A recovered binding must never turn an external conflict into an automatic POST.
+                if localNote.recoveryBlocksAutomaticRecreate &&
+                    (localNote.syncStatus == .pendingUpload || localNote.syncStatus == .error) {
+                    localNote.recoveryPaused = true
+                    localNote.syncStatus = .error
+                    addAudit(localNote, action: "pause-remote-changed-after-recovery",
+                             reason: "恢复关联后远端版本变化，保全本地内容并等待重新核对，不自动创建冲突副本。", scope: scope)
+                    continue
+                }
                 // Cloud has changes
                 if localNote.syncStatus == .pendingUpload || localNote.syncStatus == .error {
                     // Conflict Resolution:
@@ -404,7 +422,7 @@ final class SyncEngine {
     // MARK: - Push Pending Local Notes
 
     private func pushPendingNotes(token: String, modelContext: ModelContext, scope: Scope) async throws {
-        try await pushPendingDeletes(token: token, modelContext: modelContext, scope: scope)
+        let deleteFailures = try await pushPendingDeletes(token: token, modelContext: modelContext, scope: scope)
 
         let pendingStatus = SyncStatus.pendingUpload.rawValue
         let errorStatus = SyncStatus.error.rawValue
@@ -415,7 +433,7 @@ final class SyncEngine {
 
         var uploadFailures = 0
         for note in pendingNotes where note.ownerAccountID == scope.accountID {
-            if note.isDeletedLocally { continue }
+            if note.isDeletedLocally || note.recoveryPaused || note.recoveryPendingDeleteID != nil { continue }
             do {
                 try await uploadNote(note, token: token, scope: scope)
             } catch {
@@ -428,11 +446,11 @@ final class SyncEngine {
 
         try modelContext.save()
 
-        if uploadFailures > 0 {
+        if uploadFailures + deleteFailures > 0 {
             throw NSError(
                 domain: "SyncEngine",
                 code: -2,
-                userInfo: [NSLocalizedDescriptionKey: "Failed to upload \(uploadFailures) note(s)"]
+                userInfo: [NSLocalizedDescriptionKey: "仍有 \(uploadFailures + deleteFailures) 项上传、删除或待核对操作未完成。"]
             )
         }
     }
@@ -522,6 +540,7 @@ final class SyncEngine {
             // sessions get 403/404; Graph also silently no-ops body writes on
             // PATCH /me/messages for non-draft notes. Recreate instead.
             if [400, 403, 404].contains(httpResponse.statusCode) {
+                guard !note.recoveryBlocksAutomaticRecreate else { throw syncError(-42, "关联对象更新失败；已禁止自动重建，请在待核对页明确确认。") }
                 try await replaceRemoteNote(note, token: token, scope: scope, payloadData: jsonData, uploadedHTML: html, snapshot: snapshot)
                 return
             }
@@ -726,19 +745,26 @@ final class SyncEngine {
     func scheduleDebouncedPush(for noteID: UUID, in modelContext: ModelContext) {
         // Capture login generation when scheduled, not after the debounce delay.
         guard let scope = try? currentScope() else { return }
+        // This dictionary contains WAITING delays only, never a dispatched CREATE task.
         debounceTasks[noteID]?.cancel()
-
+        let debounceToken = UUID()
+        debounceTokens[noteID] = debounceToken
         debounceTasks[noteID] = Task {
             try? await Task.sleep(nanoseconds: debounceNanoseconds) // 1.5 seconds debounce
-            guard !Task.isCancelled else { return }
-
+            guard !Task.isCancelled, debounceTokens[noteID] == debounceToken else { return }
+            debounceTasks.removeValue(forKey: noteID)
+            debounceTokens.removeValue(forKey: noteID)
+            activeScheduledPushCount += 1
+            defer { activeScheduledPushCount -= 1 }
+            // The in-flight operation now owns its lifecycle. Further typing queues a new delay,
+            // not cancellation of this non-idempotent request.
             guard authManager.isAuthenticated else { return }
 
             let descriptor = FetchDescriptor<StickyNote>(
                 predicate: #Predicate<StickyNote> { $0.id == noteID }
             )
             guard let note = try? modelContext.fetch(descriptor).first,
-                  note.ownerAccountID == scope.accountID, !note.isDeletedLocally else { return }
+                  note.ownerAccountID == scope.accountID, !note.isDeletedLocally, !note.recoveryPaused else { return }
 
             do {
                 try validate(scope)
@@ -746,9 +772,10 @@ final class SyncEngine {
                 let token = try await authManager.getValidAccessToken()
                 try validate(scope)
                 try await uploadNote(note, token: token, scope: scope)
-                try await pushPendingDeletes(token: token, modelContext: modelContext, scope: scope)
+                _ = try await pushPendingDeletes(token: token, modelContext: modelContext, scope: scope)
                 try modelContext.save()
                 try ensureNoPendingWork(modelContext: modelContext, scope: scope)
+                incompleteTaskCount = 0
                 self.state = .idle
                 self.lastSyncDate = Date()
             } catch is CancellationError {
@@ -758,7 +785,8 @@ final class SyncEngine {
                 if !note.isDeleted && !note.isDeletedLocally &&
                     !(note.syncStatus == .synced && !note.pendingCleanupRemoteIDs.isEmpty) { note.syncStatus = .error }
                 try? modelContext.save()
-                self.state = .error(error.localizedDescription)
+                incompleteTaskCount = max(1, problemCount(modelContext: modelContext, scope: scope))
+                self.state = .error("尚有 \(incompleteTaskCount) 项未完成：" + error.localizedDescription)
             }
         }
     }
@@ -787,16 +815,24 @@ final class SyncEngine {
         }
     }
 
+    private func isProblem(_ note: StickyNote) -> Bool {
+        if note.pendingCreateOperationID != nil || note.recoveryPendingDeleteID != nil ||
+            !note.recoveryRetainedRemoteIDs.isEmpty || note.hasCorruptSyncJournal || note.hasCorruptRecoveryJournal { return true }
+        if note.recoveryPaused { return note.syncStatus == .error } // automatic conflict pause remains unresolved
+        return note.isDeletedLocally || note.syncStatus != .synced || !note.pendingCleanupRemoteIDs.isEmpty
+    }
+    private func problemCount(modelContext: ModelContext, scope: Scope) -> Int {
+        let notes = (try? modelContext.fetch(FetchDescriptor<StickyNote>())) ?? []
+        return notes.filter { $0.ownerAccountID == scope.accountID && isProblem($0) }.count
+    }
     private func ensureNoPendingWork(modelContext: ModelContext, scope: Scope) throws {
         try validate(scope)
-        let notes = try modelContext.fetch(FetchDescriptor<StickyNote>())
-        if notes.contains(where: { $0.ownerAccountID == scope.accountID &&
-            ($0.isDeletedLocally || $0.syncStatus != .synced || $0.pendingCreateOperationID != nil || $0.hasCorruptSyncJournal || !$0.pendingCleanupRemoteIDs.isEmpty) }) {
-            throw syncError(-34, "仍有本地改动、删除或待确认创建未完成，未标记已同步。")
-        }
+        let count = problemCount(modelContext: modelContext, scope: scope)
+        incompleteTaskCount = count
+        if count > 0 { throw syncError(-34, "仍有 \(count) 项本地改动、删除或恢复问题未完成。") }
     }
 
-    private func pushPendingDeletes(token: String, modelContext: ModelContext, scope: Scope) async throws {
+    private func pushPendingDeletes(token: String, modelContext: ModelContext, scope: Scope) async throws -> Int {
         try validate(scope)
         let localNotes = try modelContext.fetch(FetchDescriptor<StickyNote>()).filter { $0.ownerAccountID == scope.accountID }
         guard !localNotes.contains(where: { $0.hasCorruptSyncJournal }) else {
@@ -805,6 +841,7 @@ final class SyncEngine {
         var ids = pendingRemoteDeletes[scope.accountID] ?? []
         var unresolved = 0
         for note in localNotes {
+            if note.recoveryPaused || note.recoveryPendingDeleteID != nil { continue }
             // A replacement whose POST outcome is unknown must not lose its last known old object.
             if note.pendingCreateOperationID != nil {
                 if note.isDeletedLocally { unresolved += 1 }
@@ -832,13 +869,12 @@ final class SyncEngine {
             }
         }
         for note in localNotes where !note.isDeleted && note.isDeletedLocally &&
-            note.remoteId == nil && note.pendingCreateOperationID == nil && note.pendingCleanupRemoteIDs.isEmpty {
+            note.remoteId == nil && note.pendingCreateOperationID == nil && note.pendingCleanupRemoteIDs.isEmpty && !note.hasRecoveryHistory {
             modelContext.delete(note)
         }
         try modelContext.save()
-        if failures + unresolved > 0 {
-            throw syncError(-35, "删除/旧对象清理尚未完成或创建结果待确认，已保留重试记录。")
-        }
+        // Per-record errors are retained, but MUST NOT starve unrelated safe uploads.
+        return failures + unresolved
     }
 
     private func performRemoteDelete(remoteId: String, token: String, scope: Scope, retryAuthOnFailure: Bool = true) async throws {
@@ -872,6 +908,279 @@ final class SyncEngine {
         }
 
         pendingRemoteDeletes[scope.accountID]?.remove(remoteId)
+    }
+
+    // MARK: - Explicit, account-verified recovery (never invoked by timers or normal sync)
+
+    func recoveryRecords(from notes: [StickyNote]) -> [StickyNote] {
+        guard authManager.isAuthenticated, let account = authManager.accountID else { return [] }
+        return notes.filter { $0.ownerAccountID == account && $0.hasRecoveryHistory }
+            .sorted { $0.modifiedAt > $1.modifiedAt }
+    }
+    private func checkRecovery(_ note: StickyNote, scope: Scope) throws {
+        guard !note.isDeleted else { throw syncError(-43, "本地记录已变化，请重新选择。") }
+        try requireOwner(note, scope: scope)
+        guard note.hasRecoveryHistory else { throw syncError(-43, "此记录没有待核对/恢复历史。") }
+        guard !note.hasCorruptRecoveryJournal, !note.hasCorruptSyncJournal else {
+            throw syncError(-41, "恢复日志损坏，保留原件并停止自动处理；请先导出内容。")
+        }
+    }
+    /// Fresh /me verification, not just a cached display name or email comparison.
+    private func freshRecoveryToken(_ note: StickyNote, scope: Scope) async throws -> String {
+        try checkRecovery(note, scope: scope)
+        let token = try await authManager.getValidAccessToken()
+        try validate(scope)
+        var request = URLRequest(url: URL(string: "\(graphEndpoint)/me?$select=id")!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await scopedData(for: request, scope: scope)
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["id"] as? String == scope.accountID else {
+            throw syncError(-44, "令牌的微软账号与原记录不一致，未读取候选或执行恢复。")
+        }
+        try checkRecovery(note, scope: scope)
+        return token
+    }
+    private func readRecoveryCandidate(_ note: StickyNote, id: String, kind: RecoveryRemoteKind,
+                                       scope: Scope, token: String, allowPreviouslyVerifiedMissing: Bool = false) async throws -> VerifiedRecoveryCandidate {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let url = graphItemURL(collection: kind.collection, id: trimmed) else { throw syncError(-45, "请输入完整远端对象 ID。") }
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        if kind == .mailNote {
+            components.queryItems = [URLQueryItem(name: "$expand", value: "singleValueExtendedProperties($filter=id eq 'String 0x001A' or id eq '\(NoteConverter.webNoteJSONPropertyId)')")]
+        }
+        var request = URLRequest(url: components.url!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await scopedData(for: request, scope: scope)
+        try checkRecovery(note, scope: scope)
+        let status = (response as? HTTPURLResponse)?.statusCode
+        let durableDelete = note.recoveryPendingDeleteID == trimmed && note.recoveryPendingDeleteKindRaw == kind.rawValue
+        if status == 404, durableDelete || allowPreviouslyVerifiedMissing {
+            return VerifiedRecoveryCandidate(sourceID: note.id, accountID: scope.accountID, generation: scope.generation,
+                recoveryVersion: note.recoveryVersion, operationID: note.pendingCreateOperationID, wasDeleted: note.isDeletedLocally,
+                id: trimmed, kind: kind, exists: false, changeKey: nil, html: "", webNoteJSON: nil)
+        }
+        guard status == 200, let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["id"] as? String == trimmed, let key = json["changeKey"] as? String, !key.isEmpty,
+              let html = (json["body"] as? [String: Any])?["content"] as? String else {
+            throw syncError(-45, "候选未通过精确 ID 读取核验。未找到不等于未创建，不会自动解除标记。")
+        }
+        let properties = json["singleValueExtendedProperties"] as? [[String: Any]] ?? []
+        if kind == .mailNote {
+            guard properties.contains(where: { ($0["id"] as? String)?.lowercased() == "string 0x001a" &&
+                ($0["value"] as? String)?.lowercased() == "ipm.stickynote" }) else {
+                throw syncError(-45, "邮箱对象不是已核验的 IPM.StickyNote，禁止关联或删除普通邮件。")
+            }
+        } else if let type = json["@odata.type"] as? String, type.lowercased() != "#microsoft.graph.note" {
+            throw syncError(-45, "候选资源类型不是 Graph note。")
+        }
+        let webJSON = properties.first { $0["id"] as? String == NoteConverter.webNoteJSONPropertyId }?["value"] as? String
+        return VerifiedRecoveryCandidate(sourceID: note.id, accountID: scope.accountID, generation: scope.generation,
+            recoveryVersion: note.recoveryVersion, operationID: note.pendingCreateOperationID, wasDeleted: note.isDeletedLocally,
+            id: trimmed, kind: kind, exists: true, changeKey: key, html: html, webNoteJSON: webJSON)
+    }
+    func verifyRecoveryCandidate(_ note: StickyNote, id: String, kind: RecoveryRemoteKind) async throws -> VerifiedRecoveryCandidate {
+        let scope = try currentScope()
+        try checkRecovery(note, scope: scope)
+        let version = note.recoveryVersion, operation = note.pendingCreateOperationID, deleted = note.isDeletedLocally
+        let token = try await freshRecoveryToken(note, scope: scope)
+        let result = try await readRecoveryCandidate(note, id: id, kind: kind, scope: scope, token: token)
+        guard note.recoveryVersion == version, note.pendingCreateOperationID == operation, note.isDeletedLocally == deleted else {
+            throw syncError(-43, "本地恢复状态已变化，请重新核对。")
+        }
+        return result
+    }
+    private func requireRecoveryConfirmation(_ reason: String, acknowledged: Bool) throws -> String {
+        let text = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard acknowledged, !text.isEmpty, text.count <= 1000 else {
+            throw syncError(-46, "必须明确确认风险，并填写不含密码/令牌的核对依据（1–1000字）。")
+        }
+        return text
+    }
+    private func validateCandidate(_ candidate: VerifiedRecoveryCandidate, note: StickyNote, scope: Scope) throws {
+        try checkRecovery(note, scope: scope)
+        guard candidate.sourceID == note.id, candidate.accountID == scope.accountID, candidate.generation == scope.generation,
+              candidate.recoveryVersion == note.recoveryVersion, candidate.operationID == note.pendingCreateOperationID,
+              candidate.wasDeleted == note.isDeletedLocally else { throw syncError(-43, "候选或本地记录已过期/切号，请重新核对。") }
+    }
+    private func addAudit(_ note: StickyNote, action: String, reason: String, scope: Scope,
+                          candidate: VerifiedRecoveryCandidate? = nil, related: [UUID] = []) {
+        note.recoveryAudit.append(RecoveryAuditEntry(accountID: scope.accountID, action: action, reason: reason,
+            priorOperationID: note.pendingCreateOperationID, remoteID: candidate?.id, kind: candidate?.kind,
+            changeKey: candidate?.changeKey, priorEndpoint: note.pendingCreateEndpoint, priorStartedAt: note.pendingCreateStartedAt,
+            relatedLocalIDs: related))
+        note.recoveryVersion += 1
+    }
+    private func archiveRecoverySnapshot(_ source: StickyNote, scope: Scope, context: ModelContext) -> StickyNote {
+        let copy = StickyNote(color: source.noteColor, content: source.plainTextContent, ownerAccountID: scope.accountID, syncStatus: .synced)
+        copy.attributedContentData = source.attributedContentData
+        copy.audioRecordings = source.audioRecordings
+        copy.webNoteJSON = source.webNoteJSON
+        copy.createdAt = source.createdAt; copy.modifiedAt = source.modifiedAt
+        copy.windowX = source.windowX; copy.windowY = source.windowY
+        copy.windowWidth = source.windowWidth; copy.windowHeight = source.windowHeight
+        copy.recoveryPaused = true; copy.recoveryIsArchive = true
+        copy.recoveryAudit = [RecoveryAuditEntry(accountID: scope.accountID, action: "local-content-snapshot",
+            reason: "用户确认恢复操作前的本地内容与旧元数据保全；未关联远端，不会自动上传。",
+            priorOperationID: source.pendingCreateOperationID, remoteID: source.remoteId, kind: nil, changeKey: source.changeKey, priorEndpoint: source.pendingCreateEndpoint, priorStartedAt: source.pendingCreateStartedAt,
+            relatedLocalIDs: [source.id])]
+        context.insert(copy)
+        return copy
+    }
+    private func retainOldReferences(_ note: StickyNote, except id: String? = nil) {
+        var retained = Set(note.recoveryRetainedRemoteIDs + note.pendingCleanupRemoteIDs)
+        if let old = note.remoteId, old != id { retained.insert(old) }
+        if let id { retained.remove(id) }
+        note.recoveryRetainedRemoteIDs = retained.sorted()
+        note.pendingCleanupRemoteIDs = [] // recovery never silently schedules deletion of old objects
+    }
+    private func clearCreateIntent(_ note: StickyNote) {
+        note.pendingCreateOperationID = nil; note.pendingCreateEndpoint = nil; note.pendingCreateStartedAt = nil
+    }
+
+    func exportRecoveryContent(_ note: StickyNote) throws -> Data {
+        let scope = try currentScope()
+        guard !note.isDeleted else { throw syncError(-43, "本地记录已移除。") }
+        try requireOwner(note, scope: scope)
+        // Export is read-only and allowed even if a journal cannot be parsed; raw journal bytes
+        // are added separately so corruption is not silently lost.
+        let content = RecoveryContentExport(formatVersion: 1, localID: note.id, ownerAccountID: note.ownerAccountID,
+            plainText: note.plainTextContent, attributedContentData: note.attributedContentData, audioRecordings: note.audioRecordings,
+            color: note.colorRawValue, createdAt: note.createdAt, modifiedAt: note.modifiedAt,
+            windowFrame: [note.windowX, note.windowY, note.windowWidth, note.windowHeight], remoteID: note.remoteId,
+            changeKey: note.changeKey, webNoteJSON: note.webNoteJSON, isDeletedLocally: note.isDeletedLocally,
+            operationID: note.pendingCreateOperationID, operationEndpoint: note.pendingCreateEndpoint,
+            operationStartedAt: note.pendingCreateStartedAt, retainedRemoteIDs: note.recoveryRetainedRemoteIDs,
+            automaticCleanupRemoteIDs: note.pendingCleanupRemoteIDs, pendingRecoveryDeleteID: note.recoveryPendingDeleteID,
+            pendingRecoveryDeleteKind: note.recoveryPendingDeleteKindRaw, recoveryPaused: note.recoveryPaused, audit: note.recoveryAudit)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+        var json = try JSONSerialization.jsonObject(with: encoder.encode(content)) as! [String: Any]
+        json["rawRecoveryAuditBase64"] = note.recoveryAuditData?.base64EncodedString()
+        json["rawRecoveryRetainedIDsBase64"] = note.recoveryRetainedIDsData?.base64EncodedString()
+        json["rawCleanupIDsBase64"] = note.pendingCleanupIDsData?.base64EncodedString()
+        return try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+    }
+
+    func restoreRecoveryLocalOnly(_ note: StickyNote, reason: String, acknowledged: Bool) async throws {
+        let scope = try currentScope(), id = note.id
+        let text = try requireRecoveryConfirmation(reason, acknowledged: acknowledged)
+        await acquireUpload(id); defer { releaseUpload(id) }
+        try checkRecovery(note, scope: scope)
+        note.recoveryPaused = true; note.isDeletedLocally = false; note.syncStatus = .synced
+        addAudit(note, action: "restore-local-only-keep-uncertainty", reason: text, scope: scope)
+        try saveDurably(note) // unknown POST marker intentionally remains
+    }
+
+    func confirmRecoveryCandidate(_ note: StickyNote, candidate: VerifiedRecoveryCandidate, action: RecoveryAction,
+                                  reason: String, acknowledged: Bool) async throws {
+        guard [.associate, .deleteCandidate, .deleteRetained].contains(action) else { throw syncError(-46, "无效恢复操作。") }
+        let scope = try currentScope(), id = note.id
+        let text = try requireRecoveryConfirmation(reason, acknowledged: acknowledged)
+        await acquireUpload(id); defer { releaseUpload(id) }
+        try validateCandidate(candidate, note: note, scope: scope)
+        if action != .deleteRetained, note.pendingCreateOperationID != nil,
+            (note.remoteId == candidate.id || note.recoveryRetainedRemoteIDs.contains(candidate.id)) {
+            throw syncError(-46, "这是此前已知旧对象，不能用它认领未知的新建结果；可单独核对并删除旧引用。")
+        }
+        if action == .deleteRetained, !note.recoveryRetainedRemoteIDs.contains(candidate.id) { throw syncError(-46, "该 ID 不在保留的旧对象清单。") }
+        if let pending = note.recoveryPendingDeleteID,
+            pending != candidate.id || note.recoveryPendingDeleteKindRaw != candidate.kind.rawValue {
+            throw syncError(-46, "先核对已有的待确认删除 ID，不能覆盖其日志。")
+        }
+        if action == .associate, note.recoveryPendingDeleteID != nil { throw syncError(-46, "先完成已有删除核对，再关联。") }
+        let token = try await freshRecoveryToken(note, scope: scope)
+        let fresh = try await readRecoveryCandidate(note, id: candidate.id, kind: candidate.kind, scope: scope, token: token,
+                                                   allowPreviouslyVerifiedMissing: candidate.exists && action != .associate)
+        try validateCandidate(candidate, note: note, scope: scope)
+        guard fresh.exists == candidate.exists || (!fresh.exists && action != .associate),
+              !fresh.exists || fresh.changeKey == candidate.changeKey else { throw syncError(-43, "远端对象版本已变化，请重新预览后确认。") }
+        guard let context = note.modelContext else { throw syncError(-33, "本地记录未持久化。") }
+        if action == .associate {
+            guard fresh.exists, let changeKey = fresh.changeKey else { throw syncError(-45, "不能关联不存在的候选。") }
+            let duplicates = try context.fetch(FetchDescriptor<StickyNote>()).filter {
+                $0.id != note.id && $0.ownerAccountID == scope.accountID && $0.remoteId == fresh.id
+            }
+            guard !duplicates.contains(where: { uploadingNoteIDs.contains($0.id) || $0.pendingCreateOperationID != nil || !$0.pendingCleanupRemoteIDs.isEmpty ||
+                $0.recoveryPendingDeleteID != nil || $0.hasCorruptRecoveryJournal || $0.hasCorruptSyncJournal || $0.isDeletedLocally }) else {
+                throw syncError(-46, "已有本地关联副本含未决操作，需先单独核对；不会静默删除或合并。")
+            }
+            let archive = archiveRecoverySnapshot(note, scope: scope, context: context)
+            for duplicate in duplicates {
+                addAudit(duplicate, action: "archive-local-representation", reason: text, scope: scope, candidate: fresh, related: [note.id])
+                duplicate.remoteId = nil; duplicate.changeKey = nil; duplicate.lastSyncedAt = nil
+                duplicate.recoveryPaused = true; duplicate.recoveryIsArchive = true; duplicate.syncStatus = .synced
+            }
+            addAudit(note, action: "associate-user-attested-exact-object", reason: text, scope: scope, candidate: fresh,
+                     related: [archive.id] + duplicates.map(\.id))
+            retainOldReferences(note, except: fresh.id)
+            clearCreateIntent(note)
+            note.remoteId = fresh.id; note.changeKey = changeKey
+            if let web = fresh.webNoteJSON { note.webNoteJSON = web }
+            note.recoveryPaused = false; note.recoveryBlocksAutomaticRecreate = true
+            note.isDeletedLocally = false; note.syncStatus = .pendingUpload
+            try context.save()
+            return // no remote writes; a later regular PATCH may run, but automatic recreate is blocked
+        }
+        let archive = archiveRecoverySnapshot(note, scope: scope, context: context)
+        addAudit(note, action: action == .deleteRetained ? "delete-retained-authorized" : "delete-candidate-authorized",
+                 reason: text, scope: scope, candidate: fresh, related: [archive.id])
+        if action == .deleteCandidate { note.recoveryPaused = true }
+        note.recoveryPendingDeleteID = fresh.id; note.recoveryPendingDeleteKindRaw = fresh.kind.rawValue
+        let actionVersion = note.recoveryVersion
+        try context.save() // explicit authorization/intention survives lost DELETE response
+        if fresh.exists {
+            var request = URLRequest(url: graphItemURL(collection: fresh.kind.collection, id: fresh.id)!)
+            request.httpMethod = "DELETE"
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            let (_, response) = try await scopedData(for: request, scope: scope)
+            guard let status = (response as? HTTPURLResponse)?.statusCode, (200...299).contains(status) || status == 404 else {
+                throw syncError(-47, "删除结果未确认：保留精确 ID 和授权记录，不会自动重发；请重新核对。")
+            }
+        }
+        try checkRecovery(note, scope: scope)
+        guard note.recoveryVersion == actionVersion, note.isDeletedLocally == candidate.wasDeleted else {
+            throw syncError(-43, "删除后本地状态已变化，保留核对记录，请重新检查。")
+        }
+        addAudit(note, action: "delete-confirmed-or-previously-authorized-object-absent", reason: text, scope: scope, candidate: fresh)
+        if action == .deleteCandidate {
+            retainOldReferences(note, except: fresh.id)
+            clearCreateIntent(note)
+            note.remoteId = nil; note.changeKey = nil; note.lastSyncedAt = nil
+            note.isDeletedLocally = false; note.syncStatus = .synced // intentionally local-only, not a cloud success claim
+        } else { note.recoveryRetainedRemoteIDs.removeAll { $0 == fresh.id } }
+        note.recoveryPendingDeleteID = nil; note.recoveryPendingDeleteKindRaw = nil
+        try context.save()
+    }
+
+    func retryRecoveryCreate(_ note: StickyNote, expectedVersion: Int, reason: String, acknowledged: Bool) async throws {
+        let scope = try currentScope(), id = note.id
+        let text = try requireRecoveryConfirmation(reason, acknowledged: acknowledged)
+        await acquireUpload(id); defer { releaseUpload(id) }
+        try checkRecovery(note, scope: scope)
+        guard note.recoveryVersion == expectedVersion else { throw syncError(-43, "恢复请求已过期，请重新确认。") }
+        guard note.pendingCreateOperationID != nil || note.recoveryPaused ||
+            (note.recoveryBlocksAutomaticRecreate && note.syncStatus != .synced) else { throw syncError(-46, "此对象无需重建，已拒绝重复创建。") }
+        guard note.recoveryPendingDeleteID == nil else { throw syncError(-46, "先完成已授权删除的核对，不能直接另建。") }
+        let operation = note.pendingCreateOperationID, deleted = note.isDeletedLocally
+        let token = try await freshRecoveryToken(note, scope: scope)
+        guard note.recoveryVersion == expectedVersion, note.pendingCreateOperationID == operation,
+              note.isDeletedLocally == deleted else { throw syncError(-43, "本地状态变化，请重新确认。") }
+        guard let context = note.modelContext else { throw syncError(-33, "本地记录未持久化。") }
+        let archive = archiveRecoverySnapshot(note, scope: scope, context: context)
+        addAudit(note, action: "retry-create-authorized-duplicate-risk-accepted", reason: text, scope: scope, related: [archive.id])
+        retainOldReferences(note)
+        clearCreateIntent(note)
+        note.remoteId = nil; note.changeKey = nil; note.lastSyncedAt = nil
+        note.isDeletedLocally = false; note.recoveryPaused = false; note.recoveryBlocksAutomaticRecreate = true
+        note.syncStatus = .pendingUpload
+        try context.save()
+        // No await between clearing the old intent and starting the new durable POST intent;
+        // the per-note lock remains held throughout. This is not a "clear flag and hope" action.
+        do { try await uploadLocked(note, token: token, retryAuthOnFailure: false, scope: scope) }
+        catch {
+            if !note.isDeleted { note.syncStatus = .error; try saveDurably(note) }
+            throw error
+        }
     }
 
     // MARK: - Graph URL Helpers

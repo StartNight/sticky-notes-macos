@@ -32,4 +32,34 @@ final class SyncJournalPersistenceTests: XCTestCase {
         XCTAssertEqual(note.pendingCleanupRemoteIDs, ["retired-1", "retired-2"])
         XCTAssertTrue(note.isDeletedLocally)
     }
+    func testRecoveryAuditAndExplicitPendingDeleteSurviveTemporaryDiskReopen() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let schema = Schema([StickyNote.self])
+        let config = ModelConfiguration(schema: schema, url: folder.appendingPathComponent("recovery.store"))
+        do {
+            let store = try ModelContainer(for: schema, configurations: [config])
+            let context = ModelContext(store)
+            let note = StickyNote(content: "retained-test-content", ownerAccountID: "fake-A")
+            note.recoveryPaused = true; note.recoveryIsArchive = true
+            note.recoveryBlocksAutomaticRecreate = true; note.recoveryVersion = 7
+            note.recoveryPendingDeleteID = "exact-authorized-ID"
+            note.recoveryPendingDeleteKindRaw = RecoveryRemoteKind.mailNote.rawValue
+            note.recoveryRetainedRemoteIDs = ["old-retained-ID"]
+            note.recoveryAudit = [RecoveryAuditEntry(accountID: "fake-A", action: "delete-authorized", reason: "test-confirmation", priorOperationID: "fake-old-operation", remoteID: "exact-authorized-ID", kind: .mailNote, changeKey: "test-key", priorEndpoint: "/v1.0/me/notes", priorStartedAt: Date(timeIntervalSince1970: 123456), relatedLocalIDs: [])]
+            context.insert(note); try context.save()
+        }
+        let reopened = try ModelContainer(for: schema, configurations: [config])
+        let n = try XCTUnwrap(reopened.mainContext.fetch(FetchDescriptor<StickyNote>()).first)
+        XCTAssertTrue(n.recoveryPaused); XCTAssertTrue(n.recoveryIsArchive)
+        XCTAssertTrue(n.recoveryBlocksAutomaticRecreate); XCTAssertEqual(n.recoveryVersion, 7)
+        XCTAssertEqual(n.recoveryPendingDeleteID, "exact-authorized-ID")
+        XCTAssertEqual(n.recoveryPendingDeleteKindRaw, RecoveryRemoteKind.mailNote.rawValue)
+        XCTAssertEqual(n.recoveryRetainedRemoteIDs, ["old-retained-ID"])
+        XCTAssertEqual(n.recoveryAudit.first?.priorOperationID, "fake-old-operation")
+        XCTAssertEqual(n.recoveryAudit.first?.priorEndpoint, "/v1.0/me/notes")
+        XCTAssertEqual(n.plainTextContent, "retained-test-content")
+    }
+
 }

@@ -55,6 +55,7 @@ targets:
       - StickyNotes/Services/AuthManager.swift
       - StickyNotes/Services/NoteConverter.swift
       - StickyNotes/Services/SyncEngine.swift
+      - StickyNotes/Services/SyncRecoveryTypes.swift
       - StickyNotes/Services/TextEditorProxy.swift
       - StickyNotes/Utilities/ColorExtensions.swift
       - StickyNotes/Utilities/KeychainHelper.swift

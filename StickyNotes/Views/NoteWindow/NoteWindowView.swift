@@ -45,6 +45,10 @@ struct NoteWindowView: View {
                         onCreateNote: { createNote() }
                     )
 
+                    if note.recoveryPaused {
+                        Text(String(localized: "Recovery paused — local content only"))
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
                     if note.pendingCreateOperationID != nil {
                         Text(String(localized: "Creation result needs verification — automatic retry blocked"))
                             .font(.caption2).foregroundStyle(.orange)

@@ -49,6 +49,32 @@ final class StickyNote {
     var pendingCreateStartedAt: Date?
     /// Durable old-object cleanup journal, account ownership inherited from this note.
     var pendingCleanupIDsData: Data?
+    var recoveryPaused: Bool = false
+    var recoveryIsArchive: Bool = false
+    var recoveryBlocksAutomaticRecreate: Bool = false
+    var recoveryVersion: Int = 0
+    var recoveryAuditData: Data?
+    var recoveryRetainedIDsData: Data?
+    var recoveryPendingDeleteID: String?
+    var recoveryPendingDeleteKindRaw: String?
+    var recoveryAudit: [RecoveryAuditEntry] {
+        get { recoveryAuditData.flatMap { try? JSONDecoder().decode([RecoveryAuditEntry].self, from: $0) } ?? [] }
+        set { recoveryAuditData = try? JSONEncoder().encode(newValue) }
+    }
+    var recoveryRetainedRemoteIDs: [String] {
+        get { recoveryRetainedIDsData.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? [] }
+        set { recoveryRetainedIDsData = try? JSONEncoder().encode(newValue) }
+    }
+    var hasCorruptRecoveryJournal: Bool {
+        if let data = recoveryAuditData, (try? JSONDecoder().decode([RecoveryAuditEntry].self, from: data)) == nil { return true }
+        if let data = recoveryRetainedIDsData, (try? JSONDecoder().decode([String].self, from: data)) == nil { return true }
+        return false
+    }
+    var hasRecoveryHistory: Bool {
+        pendingCreateOperationID != nil || recoveryPaused || recoveryPendingDeleteID != nil ||
+        recoveryAuditData != nil || recoveryRetainedIDsData != nil || hasCorruptRecoveryJournal ||
+        (recoveryBlocksAutomaticRecreate && syncStatus != .synced)
+    }
     var pendingCleanupRemoteIDs: [String] {
         get { pendingCleanupIDsData.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? [] }
         set { pendingCleanupIDsData = try? JSONEncoder().encode(newValue) }
@@ -58,7 +84,7 @@ final class StickyNote {
         return (try? JSONDecoder().decode([String].self, from: data)) == nil
     }
     var requiresRemoteCleanup: Bool {
-        remoteId != nil || pendingCreateOperationID != nil || hasCorruptSyncJournal || !pendingCleanupRemoteIDs.isEmpty
+        remoteId != nil || pendingCreateOperationID != nil || hasCorruptSyncJournal || !pendingCleanupRemoteIDs.isEmpty || hasRecoveryHistory
     }
 
     var syncStatus: SyncStatus {

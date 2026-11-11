@@ -18,6 +18,8 @@ final class MockURLProtocol: URLProtocol {
     nonisolated(unsafe) static var responseDelay: TimeInterval = 0
     private var stopped = false
     nonisolated(unsafe) static var holdMethods: Set<String> = []
+    nonisolated(unsafe) static var holdPredicate: ((URLRequest) -> Bool)?
+    nonisolated(unsafe) static var cancellationCount = 0
     nonisolated(unsafe) private static var held: [(MockURLProtocol, Reply)] = []
     static var heldCount: Int { lock.lock(); defer { lock.unlock() }; return held.count }
     static func releaseNext() {
@@ -42,6 +44,8 @@ final class MockURLProtocol: URLProtocol {
         handler = nil
         responseDelay = 0
         holdMethods = []
+        holdPredicate = nil
+        cancellationCount = 0
         lock.lock(); held = []; lock.unlock()
     }
 
@@ -59,7 +63,7 @@ final class MockURLProtocol: URLProtocol {
 
         let reply = Self.handler?(request) ?? .failure(.notConnectedToInternet)
         Self.lock.lock()
-        let shouldHold = Self.holdMethods.contains(request.httpMethod ?? "GET")
+        let shouldHold = Self.holdMethods.contains(request.httpMethod ?? "GET") || (Self.holdPredicate?(request) ?? false)
         if shouldHold { Self.held.append((self, reply)) }
         Self.lock.unlock()
         if shouldHold { return }
@@ -86,7 +90,10 @@ final class MockURLProtocol: URLProtocol {
         }
     }
 
-    override func stopLoading() { stopped = true }
+    override func stopLoading() {
+        stopped = true
+        Self.lock.lock(); Self.cancellationCount += 1; Self.lock.unlock()
+    }
 
     private static func readStream(_ stream: InputStream?) -> Data? {
         guard let stream else { return nil }

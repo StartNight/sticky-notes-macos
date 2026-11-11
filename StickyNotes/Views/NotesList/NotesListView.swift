@@ -262,6 +262,10 @@ struct NotesListView: View {
             LazyVStack(spacing: isCollapsed ? 4 : 8) {
                 ForEach(filteredNotes) { note in
                     VStack(alignment: .leading, spacing: 2) {
+                        if note.recoveryPaused {
+                            Text(String(localized: "Recovery paused — local content only"))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                         if note.pendingCreateOperationID != nil {
                             Text(String(localized: "Creation result needs verification — automatic retry blocked"))
                                 .font(.caption2).foregroundStyle(.orange)

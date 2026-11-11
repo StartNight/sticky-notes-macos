@@ -1642,6 +1642,534 @@
           }
         }
       }
+    },
+    "Recovery review (including deleted notes)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery review (including deleted notes)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待核对与恢复（含已删除便笺）"
+          }
+        }
+      }
+    },
+    "Done": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完成"
+          }
+        }
+      }
+    },
+    "Exact IDs only. No automatic similarity matching or proof of non-creation. Actions require the original account, verification, and explicit confirmation.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Exact IDs only. No automatic similarity matching or proof of non-creation. Actions require the original account, verification, and explicit confirmation."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅核对精确 ID，不按相似内容自动匹配，也不据此证明未创建。操作必须使用原账号、重新核验并明确确认。"
+          }
+        }
+      }
+    },
+    "Hidden tombstone — content retained": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hidden tombstone — content retained"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "隐藏的删除记录：内容已保留"
+          }
+        }
+      }
+    },
+    "Preserved local snapshot": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preserved local snapshot"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保全的本地快照"
+          }
+        }
+      }
+    },
+    "Deletion awaiting verification": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deletion awaiting verification"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除结果待核对"
+          }
+        }
+      }
+    },
+    "Select a recovery record from the original account.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Select a recovery record from the original account."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请选择原账号下的一条恢复记录。"
+          }
+        }
+      }
+    },
+    "Confirm recovery action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm recovery action"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "确认恢复操作"
+          }
+        }
+      }
+    },
+    "Confirm this exact action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm this exact action"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "确认本次具体操作"
+          }
+        }
+      }
+    },
+    "Export retained content and recovery metadata…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export retained content and recovery metadata…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出保留内容与恢复元数据…"
+          }
+        }
+      }
+    },
+    "Export is optional and only writes to a location you choose. JSON includes rich text and audio, but no login tokens.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export is optional and only writes to a location you choose. JSON includes rich text and audio, but no login tokens."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出可选，仅写入你主动选择的位置。JSON 包含富文本和音频，不含登录令牌。"
+          }
+        }
+      }
+    },
+    "Old remote IDs retained — never automatically deleted:": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Old remote IDs retained — never automatically deleted:"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保留的旧远端 ID：不会自动删除："
+          }
+        }
+      }
+    },
+    "Verification evidence / reason (no passwords or tokens)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verification evidence / reason (no passwords or tokens)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "核对依据／操作理由（勿填写密码或令牌）"
+          }
+        }
+      }
+    },
+    "I verified the original account and exact object, accept uncertainty, and authorize only the action I confirm.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "I verified the original account and exact object, accept uncertainty, and authorize only the action I confirm."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我已核对原账号与具体对象，理解不确定性，仅授权接下来明确确认的操作。"
+          }
+        }
+      }
+    },
+    "Local recovery audit (not sent as logs)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local recovery audit (not sent as logs)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地恢复审计（不作为日志外发）"
+          }
+        }
+      }
+    },
+    "Candidate resource type": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Candidate resource type"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "候选资源类型"
+          }
+        }
+      }
+    },
+    "Exact remote ID to verify": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Exact remote ID to verify"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输入要核对的完整远端 ID"
+          }
+        }
+      }
+    },
+    "Verify ownership and preview (read only)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verify ownership and preview (read only)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "核验归属并预览（只读）"
+          }
+        }
+      }
+    },
+    "Verified in the original account — manual relationship confirmation still required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verified in the original account — manual relationship confirmation still required"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已核验属于原账号；仍需人工确认它与这次操作的关联。"
+          }
+        }
+      }
+    },
+    "Previously authorized deletion target is absent — review before completing local recovery": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Previously authorized deletion target is absent — review before completing local recovery"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此前已授权的删除目标已不存在；请核对后再完成本地恢复。"
+          }
+        }
+      }
+    },
+    "Restore visibility as paused local content": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore visibility as paused local content"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复可见，作为暂停同步的本地内容"
+          }
+        }
+      }
+    },
+    "Associate verified object and resume (restore if deleted)": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Associate verified object and resume (restore if deleted)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关联已核验对象并恢复同步（删除记录也恢复可见）"
+          }
+        }
+      }
+    },
+    "Delete only this verified retained old object…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete only this verified retained old object…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅删除这个已核验的保留旧对象…"
+          }
+        }
+      }
+    },
+    "Delete this verified candidate and keep content local…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete this verified candidate and keep content local…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除这个已核验候选，内容保留为本地…"
+          }
+        }
+      }
+    },
+    "Explicitly create a new remote copy (duplicate risk)…": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Explicitly create a new remote copy (duplicate risk)…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "明确重新创建远端副本（可能重复）…"
+          }
+        }
+      }
+    },
+    "Association preserves local snapshots and archives other local representations without deleting cloud objects. Recreate can leave duplicates. Never infer absence from the first page or text similarity.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Association preserves local snapshots and archives other local representations without deleting cloud objects. Recreate can leave duplicates. Never infer absence from the first page or text similarity."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关联会保全本地快照，并暂停保留其他本地副本，不会删除云端对象。重建可能产生重复，不能用首屏未找到或文本相似来推断结果。"
+          }
+        }
+      }
+    },
+    "Link this exact verified object, restore visibility, and resume later updates. Preserve local snapshots and old references. No automatic cloud merge, deletion, or recreate.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link this exact verified object, restore visibility, and resume later updates. Preserve local snapshots and old references. No automatic cloud merge, deletion, or recreate."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关联本次已核验的具体对象，恢复可见并允许后续更新；保全本地快照与旧引用。不自动合并、删除或重建云端对象。"
+          }
+        }
+      }
+    },
+    "Delete exactly the verified remote object, then retain the source locally with sync paused. Other unknown copies are not automatically found or deleted.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete exactly the verified remote object, then retain the source locally with sync paused. Other unknown copies are not automatically found or deleted."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅删除已核验的这个远端对象；源内容保留在本地并暂停同步。不会自动查找或删除其他未知副本。"
+          }
+        }
+      }
+    },
+    "Delete only this verified retained old ID. Do not resolve any separate unknown creation by guessing.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete only this verified retained old ID. Do not resolve any separate unknown creation by guessing."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅删除已核验的这个旧 ID，不猜测或解除另一项未知创建。"
+          }
+        }
+      }
+    },
+    "You are authorizing a new POST in the original account. The old POST may already exist: duplicates or orphan objects are possible. Preserve old operation history and do not automatically delete old objects.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You are authorizing a new POST in the original account. The old POST may already exist: duplicates or orphan objects are possible. Preserve old operation history and do not automatically delete old objects."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你将明确授权在原账号重新 POST。旧请求可能已落地，可能产生重复或孤立对象。保留旧操作历史，不自动删除旧对象。"
+          }
+        }
+      }
+    },
+    "Restore local visibility with sync paused. Keep unknown creation markers and all audit records; do not write to Microsoft.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore local visibility with sync paused. Keep unknown creation markers and all audit records; do not write to Microsoft."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复本地可见并暂停同步，保留未知创建标记与全部审计记录，不向微软写入。"
+          }
+        }
+      }
+    },
+    "Action recorded. Review retained references and sync status; this is not proof that all cloud copies are gone.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Action recorded. Review retained references and sync status; this is not proof that all cloud copies are gone."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "操作已记录。请继续核对旧引用与同步状态；这不证明所有云端副本均已消失。"
+          }
+        }
+      }
+    },
+    "Recovery paused — local content only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery paused — local content only"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复已暂停：仅保留本地内容"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

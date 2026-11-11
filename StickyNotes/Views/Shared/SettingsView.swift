@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var errorMessage: String? = nil
     @State private var isSyncing = false
     @State private var confirmLocalUpload = false
+    @State private var showRecovery = false
     @State private var adoptionAccountID: String?
 
     var body: some View {
@@ -28,6 +29,7 @@ struct SettingsView: View {
                 }
         }
         .frame(width: 450, height: 340)
+        .sheet(isPresented: $showRecovery) { RecoveryReviewView().modelContainer(modelContext.container) }
     }
 
     // MARK: - General Tab
@@ -89,6 +91,8 @@ struct SettingsView: View {
                 }
 
                 Section(String(localized: "Synchronization")) {
+                    Button(String(localized: "Recovery review (including deleted notes)")) { showRecovery = true }
+                        .disabled(authManager.accountID == nil)
                     Text(String(localized: "Notes from other accounts and legacy unowned notes remain local and are not uploaded to this account."))
                         .font(.caption).foregroundStyle(.secondary)
                     Button(String(localized: "Upload unowned local-only notes to this account")) {
