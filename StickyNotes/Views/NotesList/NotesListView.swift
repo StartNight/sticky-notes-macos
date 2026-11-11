@@ -262,6 +262,10 @@ struct NotesListView: View {
             LazyVStack(spacing: isCollapsed ? 4 : 8) {
                 ForEach(filteredNotes) { note in
                     VStack(alignment: .leading, spacing: 2) {
+                        if note.pendingCreateOperationID != nil {
+                            Text(String(localized: "Creation result needs verification — automatic retry blocked"))
+                                .font(.caption2).foregroundStyle(.orange)
+                        }
                         if note.ownerAccountID == nil || note.ownerAccountID != authManager.accountID {
                             Text(String(localized: "Not linked to current account — kept locally"))
                                 .font(.caption2).foregroundStyle(.secondary)
@@ -311,9 +315,11 @@ struct NotesListView: View {
     }
 
     private func deleteNote(_ note: StickyNote) {
+        do { try syncEngine.prepareForDeletion(note, modelContext: modelContext) }
+        catch { syncEngine.state = .error(error.localizedDescription); return }
         windowManager.closeWindow(for: note.id)
         let remoteId = note.remoteId
-        if remoteId != nil {
+        if note.requiresRemoteCleanup {
             note.isDeletedLocally = true
             note.syncStatus = .error
             try? modelContext.save()

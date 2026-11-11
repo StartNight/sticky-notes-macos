@@ -1626,6 +1626,22 @@
           }
         }
       }
+    },
+    "Creation result needs verification — automatic retry blocked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Creation result needs verification — automatic retry blocked"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建结果待核对：已阻止自动重试，内容保留"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

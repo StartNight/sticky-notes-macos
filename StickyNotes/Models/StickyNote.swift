@@ -43,6 +43,23 @@ final class StickyNote {
     var isDeletedLocally: Bool = false
     /// Last known modern `_Note` JSON from Graph, used to merge color without wiping OWA document data.
     var webNoteJSON: String?
+    /// Durable write-ahead marker. A lost POST response is NOT permission to POST again.
+    var pendingCreateOperationID: String?
+    var pendingCreateEndpoint: String?
+    var pendingCreateStartedAt: Date?
+    /// Durable old-object cleanup journal, account ownership inherited from this note.
+    var pendingCleanupIDsData: Data?
+    var pendingCleanupRemoteIDs: [String] {
+        get { pendingCleanupIDsData.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? [] }
+        set { pendingCleanupIDsData = try? JSONEncoder().encode(newValue) }
+    }
+    var hasCorruptSyncJournal: Bool {
+        guard let data = pendingCleanupIDsData else { return false }
+        return (try? JSONDecoder().decode([String].self, from: data)) == nil
+    }
+    var requiresRemoteCleanup: Bool {
+        remoteId != nil || pendingCreateOperationID != nil || hasCorruptSyncJournal || !pendingCleanupRemoteIDs.isEmpty
+    }
 
     var syncStatus: SyncStatus {
         get { SyncStatus(rawValue: syncStatusRaw) ?? .pendingUpload }

@@ -17,6 +17,17 @@ final class MockURLProtocol: URLProtocol {
 
     nonisolated(unsafe) static var responseDelay: TimeInterval = 0
     private var stopped = false
+    nonisolated(unsafe) static var holdMethods: Set<String> = []
+    nonisolated(unsafe) private static var held: [(MockURLProtocol, Reply)] = []
+    static var heldCount: Int { lock.lock(); defer { lock.unlock() }; return held.count }
+    static func releaseNext() {
+        lock.lock()
+        let next = held.isEmpty ? nil : held.removeFirst()
+        lock.unlock()
+        if let (instance, reply) = next {
+            DispatchQueue.main.async { if !instance.stopped { instance.deliver(reply) } }
+        }
+    }
     static let lock = NSLock()
     nonisolated(unsafe) static var handler: ((URLRequest) -> Reply)?
     nonisolated(unsafe) private static var _requests: [Recorded] = []
@@ -30,6 +41,8 @@ final class MockURLProtocol: URLProtocol {
         lock.lock(); _requests = []; lock.unlock()
         handler = nil
         responseDelay = 0
+        holdMethods = []
+        lock.lock(); held = []; lock.unlock()
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -45,6 +58,11 @@ final class MockURLProtocol: URLProtocol {
         Self.lock.unlock()
 
         let reply = Self.handler?(request) ?? .failure(.notConnectedToInternet)
+        Self.lock.lock()
+        let shouldHold = Self.holdMethods.contains(request.httpMethod ?? "GET")
+        if shouldHold { Self.held.append((self, reply)) }
+        Self.lock.unlock()
+        if shouldHold { return }
         if Self.responseDelay > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.responseDelay) { [self] in
                 if !stopped { deliver(reply) }

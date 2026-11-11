@@ -45,6 +45,10 @@ struct NoteWindowView: View {
                         onCreateNote: { createNote() }
                     )
 
+                    if note.pendingCreateOperationID != nil {
+                        Text(String(localized: "Creation result needs verification — automatic retry blocked"))
+                            .font(.caption2).foregroundStyle(.orange)
+                    }
                     if note.ownerAccountID == nil || note.ownerAccountID != AuthManager.shared.accountID {
                         Text(String(localized: "Not linked to current account — kept locally"))
                             .font(.caption2).foregroundStyle(.secondary).padding(4)
@@ -231,12 +235,14 @@ struct NoteWindowView: View {
 
     private func deleteNote() {
         guard let noteToDelete = note else { return }
+        do { try SyncEngine.shared.prepareForDeletion(noteToDelete, modelContext: modelContext) }
+        catch { SyncEngine.shared.state = .error(error.localizedDescription); return }
         let remoteId = noteToDelete.remoteId
         audioRecorder.stopPlayback()
         speechRecognizer.stopListening()
         self.note = nil
         windowManager.closeWindow(for: noteID)
-        if remoteId != nil {
+        if noteToDelete.requiresRemoteCleanup {
             noteToDelete.isDeletedLocally = true
             noteToDelete.syncStatus = .error
             try? modelContext.save()

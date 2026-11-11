@@ -306,7 +306,7 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testPushFailureMarksErrorAndErrorNotesAreRetriedNextSync() async throws {
-        let note = StickyNote(content: "x")
+        let note = StickyNote(content: "x", remoteId: "known-id", changeKey: "old")
         insertOwned(note)
         let engine = SyncEngine(authManager: SyncAuthStub.shared)
         MockURLProtocol.handler = { req in
@@ -315,7 +315,7 @@ final class SyncEngineTests: XCTestCase {
         await engine.syncAll(modelContext: ctx)
         XCTAssertEqual(note.syncStatus, .error)
         MockURLProtocol.handler = { req in
-            req.httpMethod == "GET" ? .http(status: 200, json: ["value": []]) : .http(status: 201, json: ["id": "R", "changeKey": "K"])
+            req.httpMethod == "GET" ? .http(status: 200, json: ["value": []]) : .http(status: 200, json: ["id": "known-id", "changeKey": "K", "body": ["content": "<div>x</div>"]])
         }
         await engine.syncAll(modelContext: ctx)
         XCTAssertEqual(note.syncStatus, .synced, "error 状态的便签应在下次同步时重试")
