@@ -81,12 +81,28 @@ final class AuthManager: NSObject, SyncAuthProviding {
     private let defaults: UserDefaults
     private let network: URLSession
     private(set) var accountID: String?
+    /// True once `accountID` has been confirmed against Graph `/me.id` in this launch/session.
+    private(set) var identityVerified = false
     private(set) var sessionGeneration = UUID()
     private var refreshTask: Task<String, Error>?
     private var identityTask: Task<String, Error>?
     private let kAccountID = "ms_graph_account_id"
     static let usesEphemeralSession = true
     private var currentAuthSession: ASWebAuthenticationSession?
+    /// Test seam: replaces the system web-auth sheet. Receives (authorization URL, callback scheme) and returns the
+    /// callback URL, or throws (e.g. the user cancelled). Production leaves it nil.
+    var authSessionRunner: (@MainActor (URL, String) async throws -> URL)?
+
+    /// What the UI/sync layer saw before a sign-in attempt began. Used to put things back if the attempt is cancelled
+    /// or fails BEFORE any new session was stored, so "cancel" never leaves the UI signed out while the stored session
+    /// (still valid in the keychain) would silently sign the user back in on next launch.
+    private struct SessionSnapshot {
+        let isAuthenticated: Bool
+        let userName: String?
+        let userEmail: String?
+        let accountID: String?
+        let identityVerified: Bool
+    }
 
     // Keychain Keys
     private let kAccessToken = "ms_access_token"
@@ -193,6 +209,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
     func signIn() async throws {
         NSLog("AUTH_FLOW phase=login")
         guard !isAuthenticating else { throw CancellationError() }
+        let previous = SessionSnapshot(isAuthenticated: isAuthenticated, userName: userName, userEmail: userEmail,
+                                       accountID: accountID, identityVerified: identityVerified)
         sessionGeneration = UUID()
         let generation = sessionGeneration
         refreshTask?.cancel()
@@ -205,6 +223,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
         lastAuthError = nil
         defer { if sessionGeneration == generation { isAuthenticating = false; currentAuthSession = nil } }
 
+        do {
         // 1. Generate PKCE parameters
         let codeVerifier = generateCodeVerifier()
         let codeChallenge = generateCodeChallenge(from: codeVerifier)
@@ -213,7 +232,11 @@ final class AuthManager: NSObject, SyncAuthProviding {
         let authURL = try authorizationURL(state: state, challenge: codeChallenge)
 
         // 3. Launch ASWebAuthenticationSession
-        let callbackURL: URL = try await withCheckedThrowingContinuation { continuation in
+        let callbackURL: URL
+        if let runner = authSessionRunner {
+            callbackURL = try await runner(authURL, callbackScheme)
+        } else {
+            callbackURL = try await withCheckedThrowingContinuation { continuation in
             let session = ASWebAuthenticationSession(
                 url: authURL,
                 callbackURLScheme: callbackScheme
@@ -233,6 +256,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
             if !session.start() {
                 continuation.resume(throwing: NSError(domain: "AuthManager", code: -2,
                     userInfo: [NSLocalizedDescriptionKey: "无法启动微软登录窗口"]))
+            }
             }
         }
 
@@ -263,6 +287,24 @@ final class AuthManager: NSObject, SyncAuthProviding {
         _ = try await ensureAccountID()
         try requireGeneration(generation)
         defaults.set(false, forKey: "ms_explicitly_signed_out")
+        } catch {
+            restorePreviousSession(previous, afterFailureIn: generation, error: error)
+            throw error
+        }
+    }
+
+    /// Cancel / failure before a new session was stored: show exactly what was there before (the stored session was
+    /// never touched, so this is also what the next launch will restore). Never restores over a sign-out or a newer
+    /// sign-in that happened meanwhile, and never after the new session replaced the old one.
+    private func restorePreviousSession(_ previous: SessionSnapshot, afterFailureIn generation: UUID, error: Error) {
+        guard sessionGeneration == generation, !isAuthenticated, previous.isAuthenticated else { return }
+        isAuthenticated = true
+        userName = previous.userName
+        userEmail = previous.userEmail
+        accountID = previous.accountID
+        identityVerified = previous.identityVerified
+        NSLog("AUTH_FLOW phase=login-cancelled-restored")
+        NotificationCenter.default.post(name: .requestModelContextSync, object: nil)
     }
 
     // MARK: - Token Exchange

@@ -1,5 +1,6 @@
 import XCTest
 import Security
+import AuthenticationServices
 
 @MainActor
 final class AuthManagerTests: XCTestCase {
@@ -259,5 +260,88 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertFalse(auth.isAuthenticated)
         XCTAssertNil(auth.accountID)
         XCTAssertEqual(auth.restoreState, .done)
+    }
+    // MARK: Login cancelled / failed must leave the pre-login state intact (follow-up #1)
+
+    private func callback(from authURL: URL, code: String = "fake-code") -> URL {
+        let state = URLComponents(url: authURL, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "state" }!.value!
+        return URL(string: "msauth.com.shenanigans.sticky-notes://auth?code=\(code)&state=\(state)")!
+    }
+
+    func testCancelledLoginKeepsPreviousSessionAndRelaunchAgreesWithTheUI() async {
+        let backend = seededBackend()
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults)
+        await auth.waitForRestore()
+        XCTAssertTrue(auth.isAuthenticated)
+        let generation = auth.sessionGeneration
+        auth.authSessionRunner = { _, _ in throw NSError(domain: ASWebAuthenticationSessionErrorDomain, code: ASWebAuthenticationSessionError.canceledLogin.rawValue) }
+        do { try await auth.signIn(); XCTFail("取消应抛错") } catch {}
+        XCTAssertTrue(auth.isAuthenticated, "取消后 UI 必须仍是登录前的状态")
+        XCTAssertEqual(auth.accountID, "fake-A")
+        XCTAssertEqual(auth.userEmail, "a@example.test")
+        XCTAssertFalse(auth.isAuthenticating)
+        XCTAssertEqual(auth.activeScope, .account("fake-A"))
+        XCTAssertNotEqual(auth.sessionGeneration, generation, "登录开始时作废的旧同步范围不得复活")
+        XCTAssertTrue(backend.hasItem(KeychainHelper.sessionAccount))
+        XCTAssertTrue(backend.deletes.isEmpty && backend.writes.isEmpty, "取消不写也不删钥匙串")
+        XCTAssertFalse(defaults.bool(forKey: "ms_explicitly_signed_out"))
+        // 重启后的状态与取消后 UI 一致（都是仍登录原账号）
+        let relaunched = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults)
+        await relaunched.waitForRestore()
+        XCTAssertEqual(relaunched.isAuthenticated, auth.isAuthenticated)
+        XCTAssertEqual(relaunched.accountID, auth.accountID)
+    }
+
+    func testCancelledLoginWhenSignedOutStaysSignedOut() async {
+        let auth = AuthManager(keychain: KeychainHelper(inMemoryOnly: true), defaults: defaults, loadStoredAuth: false)
+        auth.authSessionRunner = { _, _ in throw CancellationError() }
+        do { try await auth.signIn(); XCTFail() } catch {}
+        XCTAssertFalse(auth.isAuthenticated)
+        XCTAssertEqual(auth.activeScope, .unlinkedLocal)
+    }
+
+    func testFailedTokenExchangeAlsoRestoresPreviousSessionAndStoresNothingNew() async {
+        let backend = seededBackend()
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults)
+        await auth.waitForRestore()
+        auth.authSessionRunner = { [self] url, _ in callback(from: url) }
+        MockURLProtocol.handler = { _ in .http(status: 400, json: ["error": "invalid_grant"]) }
+        do { try await auth.signIn(); XCTFail() } catch {}
+        XCTAssertTrue(auth.isAuthenticated)
+        XCTAssertEqual(auth.accountID, "fake-A")
+        XCTAssertTrue(backend.writes.isEmpty && backend.deletes.isEmpty)
+    }
+
+    func testSignOutDuringLoginIsNeverUndoneByTheCancelRestore() async {
+        let backend = seededBackend()
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults)
+        await auth.waitForRestore()
+        auth.authSessionRunner = { _, _ in
+            auth.signOut()                       // user signs out while the sheet is up
+            throw CancellationError()
+        }
+        do { try await auth.signIn(); XCTFail() } catch {}
+        await auth.waitForKeychainWork()
+        XCTAssertFalse(auth.isAuthenticated, "显式退出优先，取消不得把旧会话恢复回来")
+        XCTAssertNil(auth.accountID)
+        XCTAssertTrue(defaults.bool(forKey: "ms_explicitly_signed_out"))
+        XCTAssertFalse(backend.hasItem(KeychainHelper.sessionAccount))
+    }
+
+    func testSuccessfulLoginReplacesTheSessionAndDoesNotRestoreTheOldOne() async throws {
+        let backend = seededBackend()
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults)
+        await auth.waitForRestore()
+        auth.authSessionRunner = { [self] url, _ in callback(from: url) }
+        MockURLProtocol.handler = { request in
+            if request.url?.host == "login.microsoftonline.com" {
+                return .http(status: 200, json: ["access_token": "fake-new", "refresh_token": "fake-refresh-new", "expires_in": 3600])
+            }
+            return .http(status: 200, json: ["id": "fake-B", "displayName": "B", "mail": "b@example.test"])
+        }
+        try await auth.signIn()
+        XCTAssertTrue(auth.isAuthenticated)
+        XCTAssertEqual(auth.accountID, "fake-B")
+        XCTAssertEqual(auth.userEmail, "b@example.test")
     }
 }
