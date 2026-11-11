@@ -4,8 +4,18 @@ import CryptoKit
 import SwiftUI
 
 @MainActor
+protocol SyncAuthProviding: AnyObject {
+    var isAuthenticated: Bool { get }
+    var accountID: String? { get }
+    var sessionGeneration: UUID { get }
+    func getValidAccessToken() async throws -> String
+    func refreshTokens() async throws -> String
+    func ensureAccountID() async throws -> String
+}
+
+@MainActor
 @Observable
-final class AuthManager: NSObject {
+final class AuthManager: NSObject, SyncAuthProviding {
     static let shared = AuthManager()
 
     // MARK: - Published State
@@ -43,7 +53,15 @@ final class AuthManager: NSObject {
     }
 
     private let scopes = "Mail.ReadWrite ShortNotes.ReadWrite offline_access User.Read"
-    private let keychain = KeychainHelper.shared
+    private let keychain: KeychainHelper
+    private let defaults: UserDefaults
+    private let network: URLSession
+    private(set) var accountID: String?
+    private(set) var sessionGeneration = UUID()
+    private var refreshTask: Task<String, Error>?
+    private var identityTask: Task<String, Error>?
+    private let kAccountID = "ms_graph_account_id"
+    static let usesEphemeralSession = true
     private var currentAuthSession: ASWebAuthenticationSession?
 
     // Keychain Keys
@@ -53,62 +71,28 @@ final class AuthManager: NSObject {
     private let kUserEmail = "ms_user_email"
     private let kUserName = "ms_user_name"
 
-    override init() {
+    init(keychain: KeychainHelper = .shared, defaults: UserDefaults = .standard,
+         network: URLSession = .shared, loadStoredAuth: Bool = true) {
+        self.keychain = keychain
+        self.defaults = defaults
+        self.network = network
         super.init()
-        checkStoredAuth()
+        if loadStoredAuth { checkStoredAuth() }
     }
-
-    // MARK: - Auth State Check
 
     func checkStoredAuth() {
+        NSLog("AUTH_FLOW phase=restore")
+        guard !defaults.bool(forKey: "ms_explicitly_signed_out") else { return }
         if let token = keychain.readString(key: kAccessToken), !token.isEmpty {
-            self.isAuthenticated = true
-            self.userEmail = keychain.readString(key: kUserEmail)
-            self.userName = keychain.readString(key: kUserName)
-        } else {
-            // Check if there is an existing hermes dev token file to seed
-            seedFromHermesTokenFileIfNeeded()
+            isAuthenticated = true
+            userEmail = keychain.readString(key: kUserEmail)
+            userName = keychain.readString(key: kUserName)
+            accountID = keychain.readString(key: kAccountID).flatMap { $0.isEmpty ? nil : $0 }
         }
+        // No automatic developer-token-file import: sign-out must survive relaunch.
     }
 
-    private func seedFromHermesTokenFileIfNeeded() {
-        let hermesTokenPath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".hermes/microsoft-notes/token.json")
-        guard FileManager.default.fileExists(atPath: hermesTokenPath.path),
-              let data = try? Data(contentsOf: hermesTokenPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let accessToken = json["access_token"] as? String else {
-            return
-        }
-
-        keychain.save(key: kAccessToken, string: accessToken)
-        if let refreshToken = json["refresh_token"] as? String {
-            keychain.save(key: kRefreshToken, string: refreshToken)
-        }
-        if let expiresIn = json["expires_in"] as? Double {
-            let expiryDate = Date().addingTimeInterval(expiresIn)
-            keychain.save(key: kTokenExpiry, string: String(expiryDate.timeIntervalSince1970))
-        }
-
-        self.isAuthenticated = true
-        Task {
-            await fetchUserProfile()
-        }
-    }
-
-    // MARK: - OAuth PKCE Sign In
-
-    func signIn() async throws {
-        isAuthenticating = true
-        lastAuthError = nil
-        defer { isAuthenticating = false }
-
-        // 1. Generate PKCE parameters
-        let codeVerifier = generateCodeVerifier()
-        let codeChallenge = generateCodeChallenge(from: codeVerifier)
-        let state = UUID().uuidString
-
-        // 2. Build authorization URL
+    func authorizationURL(state: String, challenge: String) throws -> URL {
         var components = URLComponents(string: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize")!
         components.queryItems = [
             URLQueryItem(name: "client_id", value: clientId),
@@ -117,13 +101,41 @@ final class AuthManager: NSObject {
             URLQueryItem(name: "response_mode", value: "query"),
             URLQueryItem(name: "scope", value: scopes),
             URLQueryItem(name: "state", value: state),
-            URLQueryItem(name: "code_challenge", value: codeChallenge),
-            URLQueryItem(name: "code_challenge_method", value: "S256")
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "prompt", value: "select_account")
         ]
+        guard let url = components.url else { throw CancellationError() }
+        return url
+    }
 
-        guard let authURL = components.url else {
-            throw NSError(domain: "AuthManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to create authorization URL"])
-        }
+    private func requireGeneration(_ generation: UUID) throws {
+        guard sessionGeneration == generation else { throw CancellationError() }
+    }
+
+    // MARK: - OAuth PKCE Sign In
+
+    func signIn() async throws {
+        NSLog("AUTH_FLOW phase=login")
+        guard !isAuthenticating else { throw CancellationError() }
+        sessionGeneration = UUID()
+        let generation = sessionGeneration
+        refreshTask?.cancel()
+        refreshTask = nil
+        identityTask?.cancel()
+        identityTask = nil
+        accountID = nil
+        isAuthenticated = false
+        isAuthenticating = true
+        lastAuthError = nil
+        defer { if sessionGeneration == generation { isAuthenticating = false; currentAuthSession = nil } }
+
+        // 1. Generate PKCE parameters
+        let codeVerifier = generateCodeVerifier()
+        let codeChallenge = generateCodeChallenge(from: codeVerifier)
+        let state = UUID().uuidString
+
+        let authURL = try authorizationURL(state: state, challenge: codeChallenge)
 
         // 3. Launch ASWebAuthenticationSession
         let callbackURL: URL = try await withCheckedThrowingContinuation { continuation in
@@ -141,10 +153,15 @@ final class AuthManager: NSObject {
             }
 
             session.presentationContextProvider = self
-            session.prefersEphemeralWebBrowserSession = false
+            session.prefersEphemeralWebBrowserSession = Self.usesEphemeralSession
             self.currentAuthSession = session
-            session.start()
+            if !session.start() {
+                continuation.resume(throwing: NSError(domain: "AuthManager", code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "无法启动微软登录窗口"]))
+            }
         }
+
+        try requireGeneration(generation)
 
         // 4. Parse Callback & Exchange Code
         guard let urlComponents = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false) else {
@@ -167,7 +184,10 @@ final class AuthManager: NSObject {
 
         // 5. Exchange code for access & refresh tokens
         try await exchangeAuthCode(authCode, codeVerifier: codeVerifier)
-        await fetchUserProfile()
+        try requireGeneration(generation)
+        _ = try await ensureAccountID()
+        try requireGeneration(generation)
+        defaults.set(false, forKey: "ms_explicitly_signed_out")
     }
 
     // MARK: - Token Exchange
@@ -191,13 +211,15 @@ final class AuthManager: NSObject {
         ]
 
         request.httpBody = params
-            .map { "\($0.key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.value)" }
+            .map { "\($0.key.addingPercentEncoding(withAllowedCharacters: Self.formAllowed) ?? $0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: Self.formAllowed) ?? $0.value)" }
             .joined(separator: "&")
             .data(using: .utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let generation = sessionGeneration
+        let (data, response) = try await network.data(for: request)
+        try requireGeneration(generation)
         guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-            let errorText = String(data: data, encoding: .utf8) ?? "HTTP error"
+            let errorText = "HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)"
             throw NSError(domain: "AuthManager", code: -8, userInfo: [NSLocalizedDescriptionKey: "Token exchange failed: \(errorText)"])
         }
 
@@ -206,15 +228,12 @@ final class AuthManager: NSObject {
             throw NSError(domain: "AuthManager", code: -9, userInfo: [NSLocalizedDescriptionKey: "Invalid token response format"])
         }
 
-        keychain.save(key: kAccessToken, string: accessToken)
-
-        if let refreshToken = json["refresh_token"] as? String {
-            keychain.save(key: kRefreshToken, string: refreshToken)
-        }
-
-        if let expiresIn = json["expires_in"] as? Double {
-            let expiryDate = Date().addingTimeInterval(expiresIn)
-            keychain.save(key: kTokenExpiry, string: String(expiryDate.timeIntervalSince1970))
+        var values = [kAccessToken: accessToken, kRefreshToken: json["refresh_token"] as? String ?? "",
+                      kAccountID: "", kUserEmail: "", kUserName: ""]
+        let seconds = (json["expires_in"] as? Double) ?? 3600
+        values[kTokenExpiry] = String(Date().addingTimeInterval(seconds).timeIntervalSince1970)
+        guard keychain.replaceSession(strings: values) else {
+            throw NSError(domain: "AuthManager", code: -13, userInfo: [NSLocalizedDescriptionKey: "无法保存登录会话，请检查钥匙串授权。"])
         }
 
         self.isAuthenticated = true
@@ -246,6 +265,24 @@ final class AuthManager: NSObject {
     }
 
     func refreshTokens() async throws -> String {
+        let generation = sessionGeneration
+        if let refreshTask {
+            let token = try await refreshTask.value
+            try requireGeneration(generation)
+            return token
+        }
+        let task = Task { try await self.performRefresh(generation: generation) }
+        refreshTask = task
+        defer { if generation == sessionGeneration { refreshTask = nil } }
+        let token = try await task.value
+        try requireGeneration(generation)
+        return token
+    }
+
+    private func performRefresh(generation: UUID) async throws -> String {
+        NSLog("AUTH_FLOW phase=refresh")
+        try Task.checkCancellation()
+        try requireGeneration(generation)
         guard let refreshToken = keychain.readString(key: kRefreshToken) else {
             self.isAuthenticated = false
             throw NSError(domain: "AuthManager", code: 401, userInfo: [NSLocalizedDescriptionKey: "No refresh token available. Please sign in again."])
@@ -267,16 +304,17 @@ final class AuthManager: NSObject {
         ]
 
         request.httpBody = params
-            .map { "\($0.key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.value)" }
+            .map { "\($0.key.addingPercentEncoding(withAllowedCharacters: Self.formAllowed) ?? $0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: Self.formAllowed) ?? $0.value)" }
             .joined(separator: "&")
             .data(using: .utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await network.data(for: request)
+        try requireGeneration(generation)
         guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-            let errorText = String(data: data, encoding: .utf8) ?? "HTTP error"
+            let errorText = "HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)"
             // If refresh token is revoked or expired
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 400 || httpResponse.statusCode == 401 {
-                signOut()
+                invalidateSession()
             }
             throw NSError(domain: "AuthManager", code: -11, userInfo: [NSLocalizedDescriptionKey: "Token refresh failed: \(errorText)"])
         }
@@ -286,15 +324,12 @@ final class AuthManager: NSObject {
             throw NSError(domain: "AuthManager", code: -12, userInfo: [NSLocalizedDescriptionKey: "Invalid refresh response format"])
         }
 
-        keychain.save(key: kAccessToken, string: newAccessToken)
-
-        if let newRefreshToken = json["refresh_token"] as? String {
-            keychain.save(key: kRefreshToken, string: newRefreshToken)
-        }
-
-        if let expiresIn = json["expires_in"] as? Double {
-            let expiryDate = Date().addingTimeInterval(expiresIn)
-            keychain.save(key: kTokenExpiry, string: String(expiryDate.timeIntervalSince1970))
+        var values = [kAccessToken: newAccessToken]
+        if let refresh = json["refresh_token"] as? String { values[kRefreshToken] = refresh }
+        let seconds = (json["expires_in"] as? Double) ?? 3600
+        values[kTokenExpiry] = String(Date().addingTimeInterval(seconds).timeIntervalSince1970)
+        guard keychain.update(strings: values) else {
+            throw NSError(domain: "AuthManager", code: -13, userInfo: [NSLocalizedDescriptionKey: "无法保存刷新会话，请检查钥匙串授权。"])
         }
 
         self.isAuthenticated = true
@@ -303,47 +338,73 @@ final class AuthManager: NSObject {
 
     // MARK: - User Profile
 
-    func fetchUserProfile() async {
-        do {
-            let token = try await getValidAccessToken()
-            guard let url = URL(string: "https://graph.microsoft.com/v1.0/me") else { return }
-
-            var request = URLRequest(url: url)
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode),
-                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return
-            }
-
-            let name = json["displayName"] as? String
-            let email = (json["mail"] as? String) ?? (json["userPrincipalName"] as? String)
-
-            self.userName = name
-            self.userEmail = email
-
-            if let name { keychain.save(key: kUserName, string: name) }
-            if let email { keychain.save(key: kUserEmail, string: email) }
-        } catch {
-            print("Failed to fetch user profile: \(error)")
+    func ensureAccountID() async throws -> String {
+        if let accountID, !accountID.isEmpty { return accountID }
+        let generation = sessionGeneration
+        if let identityTask {
+            let id = try await identityTask.value
+            try requireGeneration(generation)
+            return id
         }
+        let task = Task { try await self.resolveAccountID(generation: generation) }
+        identityTask = task
+        defer { if generation == sessionGeneration { identityTask = nil } }
+        let id = try await task.value
+        try requireGeneration(generation)
+        return id
+    }
+
+    private func resolveAccountID(generation: UUID) async throws -> String {
+        try Task.checkCancellation()
+        try requireGeneration(generation)
+        let token = try await getValidAccessToken()
+        try requireGeneration(generation)
+        var request = URLRequest(url: URL(string: "https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName")!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await network.data(for: request)
+        try requireGeneration(generation)
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = json["id"] as? String, !id.isEmpty else {
+            throw NSError(domain: "AuthManager", code: -14, userInfo: [NSLocalizedDescriptionKey: "无法确认微软账号身份，已暂停同步。"])
+        }
+        let name = json["displayName"] as? String ?? ""
+        let email = (json["mail"] as? String) ?? (json["userPrincipalName"] as? String) ?? ""
+        guard keychain.update(strings: [kAccountID: id, kUserName: name, kUserEmail: email]) else {
+            throw NSError(domain: "AuthManager", code: -13, userInfo: [NSLocalizedDescriptionKey: "无法保存账号身份，已暂停同步。"])
+        }
+        accountID = id
+        userName = name
+        userEmail = email
+        return id
     }
 
     // MARK: - Sign Out
 
-    func signOut() {
-        keychain.delete(key: kAccessToken)
-        keychain.delete(key: kRefreshToken)
-        keychain.delete(key: kTokenExpiry)
-        keychain.delete(key: kUserEmail)
-        keychain.delete(key: kUserName)
-
-        self.isAuthenticated = false
-        self.userEmail = nil
-        self.userName = nil
-        self.lastAuthError = nil
+    private func invalidateSession() {
+        // Invalidate every outstanding OAuth/refresh/sync continuation before storage changes.
+        sessionGeneration = UUID()
+        defaults.set(true, forKey: "ms_explicitly_signed_out")
+        currentAuthSession?.cancel()
+        currentAuthSession = nil
+        refreshTask?.cancel()
+        refreshTask = nil
+        identityTask?.cancel()
+        identityTask = nil
+        isAuthenticating = false
+        isAuthenticated = false
+        accountID = nil
+        userEmail = nil
+        userName = nil
     }
+
+    func signOut() {
+        NSLog("AUTH_FLOW phase=logout")
+        invalidateSession()
+        lastAuthError = keychain.clearAll() ? nil : "本地已退出，但钥匙串清理未完成；重开不会自动恢复登录。"
+    }
+
+    private static let formAllowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
 
     // MARK: - PKCE Utilities
 

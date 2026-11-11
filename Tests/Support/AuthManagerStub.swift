@@ -1,12 +1,15 @@
 import Foundation
 
-/// Test double replacing the production `AuthManager` (StickyNotes/Services/AuthManager.swift is
-/// intentionally NOT compiled into the test bundle). It exposes exactly the surface `SyncEngine`
-/// uses, so tests never touch the real keychain, the ~/.hermes token file, or Microsoft login.
+/// Injected SyncEngine identity/token provider. Production AuthManager is tested separately
+/// with an in-memory credential store and mocked HTTP; neither test path reads real secrets.
 @MainActor
 @Observable
-final class AuthManager {
-    static let shared = AuthManager()
+final class SyncAuthStub: SyncAuthProviding {
+    static let shared = SyncAuthStub()
+
+    var accountID: String? = "test-account"
+    var sessionGeneration = UUID()
+    func ensureAccountID() async throws -> String { accountID ?? "test-account" }
 
     var isAuthenticated: Bool = true
     var accessToken: String = "test-token"
@@ -27,6 +30,8 @@ final class AuthManager {
     }
 
     func reset() {
+        accountID = "test-account"
+        sessionGeneration = UUID()
         isAuthenticated = true
         accessToken = "test-token"
         refreshCallCount = 0

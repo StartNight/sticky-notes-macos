@@ -33,6 +33,8 @@ final class StickyNote {
     var audioRecordings: [Data]
 
     // MARK: - Cloud Sync Metadata
+    /// Graph /me.id of the owning account. Nil means local-only/quarantined legacy data.
+    var ownerAccountID: String?
     var remoteId: String?
     var changeKey: String?
     var syncStatusRaw: String
@@ -97,6 +99,7 @@ final class StickyNote {
         color: NoteColor = .yellow,
         content: String = "",
         remoteId: String? = nil,
+        ownerAccountID: String? = nil,
         changeKey: String? = nil,
         syncStatus: SyncStatus = .pendingUpload,
         lastSyncedAt: Date? = nil
@@ -122,6 +125,7 @@ final class StickyNote {
         self.isOpen = false
         self.audioRecordings = []
 
+        self.ownerAccountID = ownerAccountID
         self.remoteId = remoteId
         self.changeKey = changeKey
         self.syncStatusRaw = syncStatus.rawValue

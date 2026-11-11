@@ -15,6 +15,8 @@ final class MockURLProtocol: URLProtocol {
         case failure(URLError.Code)
     }
 
+    nonisolated(unsafe) static var responseDelay: TimeInterval = 0
+    private var stopped = false
     static let lock = NSLock()
     nonisolated(unsafe) static var handler: ((URLRequest) -> Reply)?
     nonisolated(unsafe) private static var _requests: [Recorded] = []
@@ -27,6 +29,7 @@ final class MockURLProtocol: URLProtocol {
     static func reset() {
         lock.lock(); _requests = []; lock.unlock()
         handler = nil
+        responseDelay = 0
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -42,6 +45,14 @@ final class MockURLProtocol: URLProtocol {
         Self.lock.unlock()
 
         let reply = Self.handler?(request) ?? .failure(.notConnectedToInternet)
+        if Self.responseDelay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.responseDelay) { [self] in
+                if !stopped { deliver(reply) }
+            }
+        } else { deliver(reply) }
+    }
+
+    private func deliver(_ reply: Reply) {
         switch reply {
         case .failure(let code):
             client?.urlProtocol(self, didFailWithError: URLError(code))
@@ -57,7 +68,7 @@ final class MockURLProtocol: URLProtocol {
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() { stopped = true }
 
     private static func readStream(_ stream: InputStream?) -> Data? {
         guard let stream else { return nil }

@@ -45,6 +45,11 @@ struct NoteWindowView: View {
                         onCreateNote: { createNote() }
                     )
 
+                    if note.ownerAccountID == nil || note.ownerAccountID != AuthManager.shared.accountID {
+                        Text(String(localized: "Not linked to current account — kept locally"))
+                            .font(.caption2).foregroundStyle(.secondary).padding(4)
+                    }
+
                     NoteTextEditor(
                         attributedText: $attributedText,
                         plainText: $plainText,
@@ -205,7 +210,7 @@ struct NoteWindowView: View {
 
     private func createNote() {
         let color = NoteColor.allCases.randomElement() ?? .yellow
-        let newNote = StickyNote(color: color)
+        let newNote = StickyNote(color: color, ownerAccountID: AuthManager.shared.accountID)
         modelContext.insert(newNote)
         try? modelContext.save()
         openWindow(value: newNote.id)
@@ -236,7 +241,7 @@ struct NoteWindowView: View {
             noteToDelete.syncStatus = .error
             try? modelContext.save()
             if let remoteId {
-                SyncEngine.shared.deleteRemoteNote(remoteId: remoteId)
+                SyncEngine.shared.deleteRemoteNote(remoteId: remoteId, ownerAccountID: noteToDelete.ownerAccountID)
             }
         } else {
             modelContext.delete(noteToDelete)

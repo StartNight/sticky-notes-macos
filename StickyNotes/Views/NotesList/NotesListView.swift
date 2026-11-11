@@ -261,12 +261,18 @@ struct NotesListView: View {
         ScrollView {
             LazyVStack(spacing: isCollapsed ? 4 : 8) {
                 ForEach(filteredNotes) { note in
-                    NoteCardView(
+                    VStack(alignment: .leading, spacing: 2) {
+                        if note.ownerAccountID == nil || note.ownerAccountID != authManager.accountID {
+                            Text(String(localized: "Not linked to current account — kept locally"))
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        NoteCardView(
                         note: note,
                         isCollapsed: isCollapsed,
                         onOpen: { openNote(note) },
                         onDelete: { requestDelete(note) }
-                    )
+                        )
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -276,7 +282,7 @@ struct NotesListView: View {
 
     private func createNote() {
         let color = NoteColor.allCases.randomElement() ?? .yellow
-        let note = StickyNote(color: color)
+        let note = StickyNote(color: color, ownerAccountID: AuthManager.shared.accountID)
         modelContext.insert(note)
         try? modelContext.save()
         openNote(note)
@@ -312,7 +318,7 @@ struct NotesListView: View {
             note.syncStatus = .error
             try? modelContext.save()
             if let remoteId {
-                syncEngine.deleteRemoteNote(remoteId: remoteId)
+                syncEngine.deleteRemoteNote(remoteId: remoteId, ownerAccountID: note.ownerAccountID)
             }
         } else {
             modelContext.delete(note)

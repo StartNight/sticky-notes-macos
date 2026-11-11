@@ -52,17 +52,8 @@ struct StickyNotesApp: App {
         do {
             return try ModelContainer(for: schema, configurations: [config])
         } catch {
-            NSLog("ModelContainer failed, resetting store: \(error)")
-            let storeURL = config.url
-            for ext in ["", ".wal", ".shm"] {
-                let url = ext.isEmpty ? storeURL : storeURL.appendingPathExtension(ext)
-                try? FileManager.default.removeItem(at: url)
-            }
-            do {
-                return try ModelContainer(for: schema, configurations: [config])
-            } catch {
-                fatalError("Failed to create ModelContainer after reset: \(error)")
-            }
+            // Never delete or recreate the user's store after a migration/open failure.
+            fatalError("无法打开便笺数据库。原数据已保留，请备份并联系支持后重试。")
         }
     }()
 
@@ -103,7 +94,7 @@ struct StickyNotesApp: App {
                 Button(String(localized: "New Note")) {
                     let context = sharedContainer.mainContext
                     let color = NoteColor.allCases.randomElement() ?? .yellow
-                    let note = StickyNote(color: color)
+                    let note = StickyNote(color: color, ownerAccountID: AuthManager.shared.accountID)
                     context.insert(note)
                     try? context.save()
                     openWindow(value: note.id)

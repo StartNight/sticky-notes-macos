@@ -36,27 +36,86 @@ final class SyncEngine {
     var state: EngineState = .idle
     var lastSyncDate: Date? {
         get {
-            let timestamp = UserDefaults.standard.double(forKey: "ms_last_sync_timestamp")
+            let timestamp = UserDefaults.standard.double(forKey: lastSyncKey)
             return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
         }
         set {
             if let newValue {
-                UserDefaults.standard.set(newValue.timeIntervalSince1970, forKey: "ms_last_sync_timestamp")
+                UserDefaults.standard.set(newValue.timeIntervalSince1970, forKey: lastSyncKey)
             } else {
-                UserDefaults.standard.removeObject(forKey: "ms_last_sync_timestamp")
+                UserDefaults.standard.removeObject(forKey: lastSyncKey)
             }
         }
     }
 
-    private let authManager = AuthManager.shared
+    private let authManager: any SyncAuthProviding
     private let graphEndpoint = "https://graph.microsoft.com/v1.0"
     private var debounceTasks: [UUID: Task<Void, Never>] = [:]
     private var periodicTimer: Timer?
     /// Remote IDs deleted locally whose DELETE has not yet succeeded (in-memory retry queue).
-    private var pendingRemoteDeletes: Set<String> = []
+    private var pendingRemoteDeletes: [String: Set<String>] = [:]
+    private var lastSyncKey: String { "ms_last_sync_timestamp.account." + (authManager.accountID ?? "unverified") }
 
-    init() {
+    struct Scope {
+        let accountID: String
+        let generation: UUID
+    }
+    private func currentScope() throws -> Scope {
+        guard authManager.isAuthenticated, let id = authManager.accountID, !id.isEmpty else {
+            throw NSError(domain: "SyncEngine", code: -20, userInfo: [NSLocalizedDescriptionKey: "账号身份未确认，已暂停同步。"])
+        }
+        return Scope(accountID: id, generation: authManager.sessionGeneration)
+    }
+    private func validate(_ scope: Scope) throws {
+        guard authManager.isAuthenticated, authManager.accountID == scope.accountID,
+              authManager.sessionGeneration == scope.generation else { throw CancellationError() }
+    }
+    private func scopedData(for request: URLRequest, scope: Scope) async throws -> (Data, URLResponse) {
+        try validate(scope)
+        do {
+            let result = try await URLSession.shared.data(for: request)
+            try validate(scope)
+            return result
+        } catch {
+            try validate(scope)
+            throw error
+        }
+    }
+    private func refreshedToken(scope: Scope) async throws -> String {
+        try validate(scope)
+        let token = try await authManager.refreshTokens()
+        try validate(scope)
+        return token
+    }
+    /// Unowned/legacy notes stay local; ownership is never guessed from the first account to sign in.
+    private func requireOwner(_ note: StickyNote, scope: Scope) throws {
+        try validate(scope)
+        guard note.ownerAccountID == scope.accountID else {
+            throw NSError(domain: "SyncEngine", code: -21, userInfo: [NSLocalizedDescriptionKey: "此便笺不属于当前账号，仅保留在本地。"])
+        }
+    }
+
+
+    init(authManager: any SyncAuthProviding = AuthManager.shared) {
+        self.authManager = authManager
         startPeriodicSync()
+    }
+
+    /// Explicit opt-in only for never-synced local notes. Legacy remote links remain quarantined.
+    func adoptLocalOnlyNotes(modelContext: ModelContext) throws -> Int {
+        let scope = try currentScope()
+        let notes = try modelContext.fetch(FetchDescriptor<StickyNote>())
+        var count = 0
+        for note in notes where note.ownerAccountID == nil && note.remoteId == nil && !note.isDeletedLocally {
+            note.ownerAccountID = scope.accountID
+            note.changeKey = nil
+            note.webNoteJSON = nil
+            note.lastSyncedAt = nil
+            note.syncStatus = .pendingUpload
+            count += 1
+        }
+        try modelContext.save()
+        return count
     }
 
     // MARK: - Periodic Sync
@@ -83,23 +142,31 @@ final class SyncEngine {
         self.state = .syncing
 
         do {
+            let generation = authManager.sessionGeneration
+            _ = try await authManager.ensureAccountID()
+            guard generation == authManager.sessionGeneration else { throw CancellationError() }
+            let scope = try currentScope()
             let token = try await authManager.getValidAccessToken()
+            try validate(scope)
             // 1. Pull remote changes
-            try await pullNotes(token: token, modelContext: modelContext)
+            try await pullNotes(token: token, modelContext: modelContext, scope: scope)
             // 2. Push pending local changes
-            try await pushPendingNotes(token: token, modelContext: modelContext)
+            try await pushPendingNotes(token: token, modelContext: modelContext, scope: scope)
+            try validate(scope)
 
             self.state = .idle
             self.lastSyncDate = Date()
+        } catch is CancellationError {
+            return
         } catch {
-            print("Sync failed: \(error)")
+            print("Sync failed: code=\((error as NSError).code)")
             self.state = .error(error.localizedDescription)
         }
     }
 
     // MARK: - Pull Remote Notes
 
-    private func pullNotes(token: String, modelContext: ModelContext, retryAuthOnFailure: Bool = true) async throws {
+    private func pullNotes(token: String, modelContext: ModelContext, scope: Scope, retryAuthOnFailure: Bool = true) async throws {
         let lidId = NoteConverter.pidLidNoteColorPropertyId
         let webId = NoteConverter.webNoteJSONPropertyId
         let expandClause = "singleValueExtendedProperties($filter=id eq '\(lidId)' or id eq '\(webId)')"
@@ -111,7 +178,7 @@ final class SyncEngine {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await scopedData(for: request, scope: scope)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
         }
@@ -120,12 +187,12 @@ final class SyncEngine {
             guard retryAuthOnFailure else {
                 throw NSError(domain: "SyncEngine", code: 401, userInfo: [NSLocalizedDescriptionKey: "Pull failed: unauthorized"])
             }
-            let newToken = try await authManager.refreshTokens()
-            return try await pullNotes(token: newToken, modelContext: modelContext, retryAuthOnFailure: false)
+            let newToken = try await refreshedToken(scope: scope)
+            return try await pullNotes(token: newToken, modelContext: modelContext, scope: scope, retryAuthOnFailure: false)
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            let err = String(data: data, encoding: .utf8) ?? "HTTP \(httpResponse.statusCode)"
+            let err = "HTTP \(httpResponse.statusCode)"
             throw NSError(domain: "SyncEngine", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "Pull failed: \(err)"])
         }
 
@@ -138,7 +205,7 @@ final class SyncEngine {
         let descriptor = FetchDescriptor<StickyNote>()
         let localNotes = (try? modelContext.fetch(descriptor)) ?? []
         var localByRemoteId: [String: StickyNote] = [:]
-        for note in localNotes {
+        for note in localNotes where note.ownerAccountID == scope.accountID {
             if let rId = note.remoteId {
                 localByRemoteId[rId] = note
             }
@@ -165,15 +232,16 @@ final class SyncEngine {
             let webNoteJSON = extracted.webNoteJSON
 
             let existingLocal = localByRemoteId[remoteId]
-            if pendingRemoteDeletes.contains(remoteId) || existingLocal?.isDeletedLocally == true {
+            if (pendingRemoteDeletes[scope.accountID] ?? []).contains(remoteId) || existingLocal?.isDeletedLocally == true {
                 // Tombstone: do not resurrect; replay DELETE and drop the local stub.
                 do {
-                    try await performRemoteDelete(remoteId: remoteId, token: token)
+                    try await performRemoteDelete(remoteId: remoteId, token: token, scope: scope)
                     if let existingLocal {
                         modelContext.delete(existingLocal)
                     }
                 } catch {
-                    print("Failed to replay delete for \(remoteId): \(error)")
+                    try validate(scope)
+                    print("Replay delete failed: code=\((error as NSError).code)")
                     if let existingLocal {
                         existingLocal.isDeletedLocally = true
                         existingLocal.syncStatus = .error
@@ -201,6 +269,7 @@ final class SyncEngine {
                             color: localNote.noteColor,
                             content: localNote.plainTextContent
                         )
+                        copyNote.ownerAccountID = scope.accountID
                         copyNote.attributedContentData = localNote.attributedContentData
                         copyNote.syncStatus = .pendingUpload
                         modelContext.insert(copyNote)
@@ -247,6 +316,7 @@ final class SyncEngine {
                 newNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
                 newNote.createdAt = remoteCreatedDate ?? Date()
                 newNote.modifiedAt = remoteModifiedDate ?? remoteCreatedDate ?? Date()
+                newNote.ownerAccountID = scope.accountID
                 newNote.webNoteJSON = webNoteJSON
                 modelContext.insert(newNote)
             }
@@ -257,8 +327,8 @@ final class SyncEngine {
 
     // MARK: - Push Pending Local Notes
 
-    private func pushPendingNotes(token: String, modelContext: ModelContext) async throws {
-        try await pushPendingDeletes(token: token, modelContext: modelContext)
+    private func pushPendingNotes(token: String, modelContext: ModelContext, scope: Scope) async throws {
+        try await pushPendingDeletes(token: token, modelContext: modelContext, scope: scope)
 
         let pendingStatus = SyncStatus.pendingUpload.rawValue
         let errorStatus = SyncStatus.error.rawValue
@@ -268,12 +338,13 @@ final class SyncEngine {
         let pendingNotes = (try? modelContext.fetch(descriptor)) ?? []
 
         var uploadFailures = 0
-        for note in pendingNotes {
+        for note in pendingNotes where note.ownerAccountID == scope.accountID {
             if note.isDeletedLocally { continue }
             do {
-                try await uploadNote(note, token: token)
+                try await uploadNote(note, token: token, scope: scope)
             } catch {
-                print("Failed to push note \(note.id): \(error)")
+                try validate(scope)
+                print("Push failed: code=\((error as NSError).code)")
                 note.syncStatus = .error
                 uploadFailures += 1
             }
@@ -292,7 +363,9 @@ final class SyncEngine {
 
     // MARK: - Upload Single Note (Create or Update)
 
-    func uploadNote(_ note: StickyNote, token: String, retryAuthOnFailure: Bool = true) async throws {
+    func uploadNote(_ note: StickyNote, token: String, retryAuthOnFailure: Bool = true, scope suppliedScope: Scope? = nil) async throws {
+        let scope = try suppliedScope ?? currentScope()
+        try requireOwner(note, scope: scope)
         let html: String
         if let data = note.attributedContentData,
            let attrStr = try? NSKeyedUnarchiver.unarchivedObject(
@@ -334,28 +407,28 @@ final class SyncEngine {
             request.setValue("return=representation", forHTTPHeaderField: "Prefer")
             request.httpBody = jsonData
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await scopedData(for: request, scope: scope)
             guard let httpResponse = response as? HTTPURLResponse else {
                 note.syncStatus = .error
                 throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
             }
 
             if (httpResponse.statusCode == 401 || httpResponse.statusCode == 403) && retryAuthOnFailure {
-                let newToken = try await authManager.refreshTokens()
-                return try await uploadNote(note, token: newToken, retryAuthOnFailure: false)
+                let newToken = try await refreshedToken(scope: scope)
+                return try await uploadNote(note, token: newToken, retryAuthOnFailure: false, scope: scope)
             }
 
             // /me/notes requires ShortNotes.ReadWrite. Existing Mail.ReadWrite
             // sessions get 403/404; Graph also silently no-ops body writes on
             // PATCH /me/messages for non-draft notes. Recreate instead.
             if [400, 403, 404].contains(httpResponse.statusCode) {
-                try await replaceRemoteNote(note, token: token, payloadData: jsonData, uploadedHTML: html)
+                try await replaceRemoteNote(note, token: token, scope: scope, payloadData: jsonData, uploadedHTML: html)
                 return
             }
 
             guard (200...299).contains(httpResponse.statusCode) else {
                 note.syncStatus = .error
-                let responseBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+                let responseBody = "Graph request failed"
                 print("Failed to update note (HTTP \(httpResponse.statusCode)): \(responseBody)")
                 throw NSError(domain: "SyncEngine", code: httpResponse.statusCode, userInfo: [
                     NSLocalizedDescriptionKey: "Failed to update note (HTTP \(httpResponse.statusCode)): \(responseBody)"
@@ -368,21 +441,21 @@ final class SyncEngine {
                 note.syncStatus = .error
                 throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid notes URL"])
             }
-            let (data, httpResponse) = try await sendJSON(url: notesURL, method: "POST", token: token, body: jsonData)
+            let (data, httpResponse) = try await sendJSON(url: notesURL, method: "POST", token: token, body: jsonData, scope: scope)
 
             if (httpResponse.statusCode == 401 || httpResponse.statusCode == 403) && retryAuthOnFailure {
-                let newToken = try await authManager.refreshTokens()
-                return try await uploadNote(note, token: newToken, retryAuthOnFailure: false)
+                let newToken = try await refreshedToken(scope: scope)
+                return try await uploadNote(note, token: newToken, retryAuthOnFailure: false, scope: scope)
             }
 
             if [400, 403, 404].contains(httpResponse.statusCode) {
-                try await createNoteInMailFolder(note, token: token, payloadData: jsonData, uploadedHTML: html)
+                try await createNoteInMailFolder(note, token: token, scope: scope, payloadData: jsonData, uploadedHTML: html)
                 return
             }
 
             guard (200...299).contains(httpResponse.statusCode) else {
                 note.syncStatus = .error
-                let responseBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+                let responseBody = "Graph request failed"
                 print("Failed to create note (HTTP \(httpResponse.statusCode)): \(responseBody)")
                 throw NSError(domain: "SyncEngine", code: httpResponse.statusCode, userInfo: [
                     NSLocalizedDescriptionKey: "Failed to create note (HTTP \(httpResponse.statusCode)): \(responseBody)"
@@ -395,28 +468,29 @@ final class SyncEngine {
 
     /// Mail.ReadWrite fallback: create a replacement note then delete the old one.
     /// PATCH /me/messages cannot persist body/subject on non-draft Outlook notes.
-    private func replaceRemoteNote(_ note: StickyNote, token: String, payloadData: Data, uploadedHTML: String) async throws {
+    private func replaceRemoteNote(_ note: StickyNote, token: String, scope: Scope, payloadData: Data, uploadedHTML: String) async throws {
         let oldId = note.remoteId
-        try await createNoteInMailFolder(note, token: token, payloadData: payloadData, uploadedHTML: uploadedHTML)
+        try await createNoteInMailFolder(note, token: token, scope: scope, payloadData: payloadData, uploadedHTML: uploadedHTML)
         if let oldId {
             do {
-                try await performRemoteDelete(remoteId: oldId, token: token)
+                try await performRemoteDelete(remoteId: oldId, token: token, scope: scope)
             } catch {
-                print("Replacement created but failed to delete previous note \(oldId): \(error)")
+                try validate(scope)
+                print("Replacement cleanup failed: code=\((error as NSError).code)")
             }
         }
     }
 
-    private func createNoteInMailFolder(_ note: StickyNote, token: String, payloadData: Data, uploadedHTML: String) async throws {
+    private func createNoteInMailFolder(_ note: StickyNote, token: String, scope: Scope, payloadData: Data, uploadedHTML: String) async throws {
         guard let url = URL(string: "\(graphEndpoint)/me/mailFolders/notes/messages") else {
             note.syncStatus = .error
             throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid notes folder URL"])
         }
         let mailPayload = Self.mailFolderCreatePayload(from: payloadData)
-        let (data, httpResponse) = try await sendJSON(url: url, method: "POST", token: token, body: mailPayload)
+        let (data, httpResponse) = try await sendJSON(url: url, method: "POST", token: token, body: mailPayload, scope: scope)
         guard (200...299).contains(httpResponse.statusCode) else {
             note.syncStatus = .error
-            let responseBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            let responseBody = "Graph request failed"
             throw NSError(domain: "SyncEngine", code: httpResponse.statusCode, userInfo: [
                 NSLocalizedDescriptionKey: "Failed to create note (HTTP \(httpResponse.statusCode)): \(responseBody)"
             ])
@@ -424,14 +498,14 @@ final class SyncEngine {
         try finishUpload(note, data: data, uploadedHTML: uploadedHTML, isCreate: true)
     }
 
-    private func sendJSON(url: URL, method: String, token: String, body: Data) async throws -> (Data, HTTPURLResponse) {
+    private func sendJSON(url: URL, method: String, token: String, body: Data, scope: Scope) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("return=representation", forHTTPHeaderField: "Prefer")
         request.httpBody = body
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await scopedData(for: request, scope: scope)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
         }
@@ -523,6 +597,8 @@ final class SyncEngine {
     // MARK: - Debounced Push
 
     func scheduleDebouncedPush(for noteID: UUID, in modelContext: ModelContext) {
+        // Capture login generation when scheduled, not after the debounce delay.
+        guard let scope = try? currentScope() else { return }
         debounceTasks[noteID]?.cancel()
 
         debounceTasks[noteID] = Task {
@@ -534,17 +610,22 @@ final class SyncEngine {
             let descriptor = FetchDescriptor<StickyNote>(
                 predicate: #Predicate<StickyNote> { $0.id == noteID }
             )
-            guard let note = try? modelContext.fetch(descriptor).first else { return }
+            guard let note = try? modelContext.fetch(descriptor).first,
+                  note.ownerAccountID == scope.accountID else { return }
 
             do {
+                try validate(scope)
                 self.state = .syncing
                 let token = try await authManager.getValidAccessToken()
-                try await uploadNote(note, token: token)
+                try validate(scope)
+                try await uploadNote(note, token: token, scope: scope)
                 try? modelContext.save()
                 self.state = .idle
                 self.lastSyncDate = Date()
+            } catch is CancellationError {
+                return
             } catch {
-                print("Debounced push error for note \(noteID): \(error)")
+                print("Debounced push failed: code=\((error as NSError).code)")
                 note.syncStatus = .error
                 try? modelContext.save()
                 self.state = .error(error.localizedDescription)
@@ -554,29 +635,34 @@ final class SyncEngine {
 
     // MARK: - Delete Note Remotely
 
-    func deleteRemoteNote(remoteId: String) {
-        pendingRemoteDeletes.insert(remoteId)
+    func deleteRemoteNote(remoteId: String, ownerAccountID: String?) {
+        guard let scope = try? currentScope(), ownerAccountID == scope.accountID else { return }
+        pendingRemoteDeletes[scope.accountID, default: []].insert(remoteId)
         Task {
             guard authManager.isAuthenticated else {
                 self.state = .error("Delete pending until signed in")
                 return
             }
             do {
+                try validate(scope)
                 let token = try await authManager.getValidAccessToken()
-                try await performRemoteDelete(remoteId: remoteId, token: token)
+                try validate(scope)
+                try await performRemoteDelete(remoteId: remoteId, token: token, scope: scope)
+            } catch is CancellationError {
+                return
             } catch {
-                print("Failed to delete remote note \(remoteId): \(error)")
+                print("Delete failed: code=\((error as NSError).code)")
                 self.state = .error(error.localizedDescription)
             }
         }
     }
 
-    private func pushPendingDeletes(token: String, modelContext: ModelContext) async throws {
+    private func pushPendingDeletes(token: String, modelContext: ModelContext, scope: Scope) async throws {
         let descriptor = FetchDescriptor<StickyNote>()
         let localNotes = (try? modelContext.fetch(descriptor)) ?? []
 
-        var ids = pendingRemoteDeletes
-        for note in localNotes where note.isDeletedLocally {
+        var ids = pendingRemoteDeletes[scope.accountID] ?? []
+        for note in localNotes where note.isDeletedLocally && note.ownerAccountID == scope.accountID {
             if let remoteId = note.remoteId {
                 ids.insert(remoteId)
             } else {
@@ -586,15 +672,16 @@ final class SyncEngine {
 
         for remoteId in ids {
             do {
-                try await performRemoteDelete(remoteId: remoteId, token: token)
-                for note in localNotes where note.remoteId == remoteId {
+                try await performRemoteDelete(remoteId: remoteId, token: token, scope: scope)
+                for note in localNotes where note.remoteId == remoteId && note.ownerAccountID == scope.accountID {
                     if note.isDeletedLocally {
                         modelContext.delete(note)
                     }
                 }
             } catch {
-                print("Failed to push pending delete \(remoteId): \(error)")
-                for note in localNotes where note.remoteId == remoteId {
+                try validate(scope)
+                print("Pending delete failed: code=\((error as NSError).code)")
+                for note in localNotes where note.remoteId == remoteId && note.ownerAccountID == scope.accountID {
                     note.isDeletedLocally = true
                     note.syncStatus = .error
                 }
@@ -602,7 +689,7 @@ final class SyncEngine {
         }
     }
 
-    private func performRemoteDelete(remoteId: String, token: String, retryAuthOnFailure: Bool = true) async throws {
+    private func performRemoteDelete(remoteId: String, token: String, scope: Scope, retryAuthOnFailure: Bool = true) async throws {
         guard let url = graphItemURL(collection: "me/messages", id: remoteId) else {
             throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid delete URL"])
         }
@@ -610,29 +697,29 @@ final class SyncEngine {
         request.httpMethod = "DELETE"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await scopedData(for: request, scope: scope)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
         }
 
         if (httpResponse.statusCode == 401 || httpResponse.statusCode == 403) && retryAuthOnFailure {
-            let newToken = try await authManager.refreshTokens()
-            return try await performRemoteDelete(remoteId: remoteId, token: newToken, retryAuthOnFailure: false)
+            let newToken = try await refreshedToken(scope: scope)
+            return try await performRemoteDelete(remoteId: remoteId, token: newToken, scope: scope, retryAuthOnFailure: false)
         }
 
         if httpResponse.statusCode == 404 {
-            pendingRemoteDeletes.remove(remoteId)
+            pendingRemoteDeletes[scope.accountID]?.remove(remoteId)
             return
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            let responseBody = String(data: data, encoding: .utf8) ?? "HTTP \(httpResponse.statusCode)"
+            let responseBody = "Graph request failed"
             throw NSError(domain: "SyncEngine", code: httpResponse.statusCode, userInfo: [
                 NSLocalizedDescriptionKey: "Failed to delete note (HTTP \(httpResponse.statusCode)): \(responseBody)"
             ])
         }
 
-        pendingRemoteDeletes.remove(remoteId)
+        pendingRemoteDeletes[scope.accountID]?.remove(remoteId)
     }
 
     // MARK: - Graph URL Helpers

@@ -41,8 +41,8 @@ targets:
   # QA: unit-test bundle WITHOUT host app.
   # Hosting would launch the real app, which opens the user's real SwiftData store and
   # auto-syncs with the signed-in Outlook account. Instead the needed production sources are
-  # compiled directly into the test bundle, and AuthManager is replaced by a test double
-  # (Tests/Support/AuthManagerStub.swift) so no keychain / network access happens.
+  # compiled directly into the test bundle. SyncEngine receives an injected auth double;
+  # AuthManager tests inject in-memory keychains / mock HTTP. No real credentials/network.
   StickyNotesTests:
     type: bundle.unit-test
     platform: macOS
@@ -52,6 +52,7 @@ targets:
     sources:
       - Tests
       - StickyNotes/Models
+      - StickyNotes/Services/AuthManager.swift
       - StickyNotes/Services/NoteConverter.swift
       - StickyNotes/Services/SyncEngine.swift
       - StickyNotes/Services/TextEditorProxy.swift

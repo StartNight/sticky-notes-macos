@@ -1428,7 +1428,7 @@
           }
         }
       }
-    }    ,
+    },
     "Notes List": {
       "extractionState": "manual",
       "localizations": {
@@ -1527,6 +1527,102 @@
           "stringUnit": {
             "state": "translated",
             "value": "全选"
+          }
+        }
+      }
+    },
+    "Notes from other accounts and legacy unowned notes remain local and are not uploaded to this account.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes from other accounts and legacy unowned notes remain local and are not uploaded to this account."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "其他账号及归属不明的旧便笺仅保留在本地，不会上传至当前账号。"
+          }
+        }
+      }
+    },
+    "Upload unowned local-only notes to this account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Upload unowned local-only notes to this account"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将未归属的纯本地便笺上传至当前账号"
+          }
+        }
+      }
+    },
+    "Upload local-only notes?": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Upload local-only notes?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上传纯本地便笺？"
+          }
+        }
+      }
+    },
+    "Upload to current account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Upload to current account"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上传至当前账号"
+          }
+        }
+      }
+    },
+    "Only notes never linked to a remote account will be assigned. Legacy remote notes and other accounts' notes will not be changed.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only notes never linked to a remote account will be assigned. Legacy remote notes and other accounts' notes will not be changed."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅分配从未关联远端的本地便笺。带旧远端关联的便笺及其他账号的便笺不变。"
+          }
+        }
+      }
+    },
+    "Not linked to current account — kept locally": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not linked to current account — kept locally"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未关联当前账号：仅在本地保留"
           }
         }
       }

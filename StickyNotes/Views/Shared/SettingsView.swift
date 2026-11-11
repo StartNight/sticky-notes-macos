@@ -12,6 +12,8 @@ struct SettingsView: View {
     @State private var isSigningIn = false
     @State private var errorMessage: String? = nil
     @State private var isSyncing = false
+    @State private var confirmLocalUpload = false
+    @State private var adoptionAccountID: String?
 
     var body: some View {
         TabView {
@@ -87,6 +89,24 @@ struct SettingsView: View {
                 }
 
                 Section(String(localized: "Synchronization")) {
+                    Text(String(localized: "Notes from other accounts and legacy unowned notes remain local and are not uploaded to this account."))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button(String(localized: "Upload unowned local-only notes to this account")) {
+                        adoptionAccountID = authManager.accountID
+                        confirmLocalUpload = true
+                    }
+                    .disabled(authManager.accountID == nil)
+                    .confirmationDialog(String(localized: "Upload local-only notes?"), isPresented: $confirmLocalUpload) {
+                        Button(String(localized: "Upload to current account")) {
+                            do {
+                                guard adoptionAccountID == authManager.accountID else { return }
+                                _ = try syncEngine.adoptLocalOnlyNotes(modelContext: modelContext)
+                                triggerManualSync()
+                            } catch { errorMessage = error.localizedDescription }
+                        }
+                    } message: {
+                        Text(String(localized: "Only notes never linked to a remote account will be assigned. Legacy remote notes and other accounts' notes will not be changed."))
+                    }
                     HStack {
                         Label {
                             Text(syncEngine.state.displayText)
@@ -155,6 +175,9 @@ struct SettingsView: View {
                 }
             }
 
+            if let authError = authManager.lastAuthError {
+                Text(authError).foregroundStyle(.red)
+            }
             Section(String(localized: "OAuth Configuration")) {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
