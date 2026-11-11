@@ -13,11 +13,16 @@ protocol SyncAuthProviding: AnyObject {
     func getValidAccessToken() async throws -> String
     func refreshTokens() async throws -> String
     func ensureAccountID() async throws -> String
+    /// True only after `accountID` was confirmed against Graph `/me.id` in this launch/session. A cached id read
+    /// from the keychain at startup is provisional (may be shown/edited locally) but never authorises cloud
+    /// reads/writes, adoption or claims until this is true.
+    var isIdentityVerified: Bool { get }
 }
 
 extension SyncAuthProviding {
     var isAuthenticating: Bool { false }
     var isRestoringSession: Bool { false }
+    var isIdentityVerified: Bool { true }
     /// What local data may be shown/edited/synced right now. Derived only from verified identity.
     var activeScope: ActiveScope {
         ActiveScope.resolve(isAuthenticated: isAuthenticated, isAuthenticating: isAuthenticating || isRestoringSession, accountID: accountID)
@@ -83,6 +88,12 @@ final class AuthManager: NSObject, SyncAuthProviding {
     private(set) var accountID: String?
     /// True once `accountID` has been confirmed against Graph `/me.id` in this launch/session.
     private(set) var identityVerified = false
+    var isIdentityVerified: Bool { identityVerified }
+    /// The token's `/me.id` differs from the account id cached in the keychain: identity is NOT confirmed, the scope
+    /// is blocked (no content shown) until the user signs out/in. Nothing is deleted or rewritten automatically.
+    private(set) var identityMismatch = false
+    private(set) var identityVerificationTask: Task<Void, Never>?
+    private let verifyIdentityAfterRestore: Bool
     private(set) var sessionGeneration = UUID()
     private var refreshTask: Task<String, Error>?
     private var identityTask: Task<String, Error>?
@@ -112,7 +123,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
     private let kUserName = "ms_user_name"
 
     init(keychain: KeychainHelper = .shared, defaults: UserDefaults = .standard,
-         network: URLSession = .shared, loadStoredAuth: Bool = true) {
+         network: URLSession = .shared, loadStoredAuth: Bool = true, verifyIdentityAfterRestore: Bool = true) {
+        self.verifyIdentityAfterRestore = verifyIdentityAfterRestore
         self.keychain = keychain
         self.defaults = defaults
         self.network = network
@@ -125,7 +137,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
     func beginRestore() {
         NSLog("AUTH_FLOW phase=restore")
         guard !defaults.bool(forKey: "ms_explicitly_signed_out") else { restoreState = .done; return }
-        if keychain.isHydrated { applyStoredAuth(); restoreState = .done; return } // memory only, no I/O
+        if keychain.isHydrated { applyStoredAuth(); restoreState = .done; startIdentityVerification(); return } // memory only, no I/O
         restoreState = .loading
         let generation = sessionGeneration
         restoreTask = Task { [weak self] in
@@ -153,6 +165,19 @@ final class AuthManager: NSObject, SyncAuthProviding {
     }
 
     func waitForRestore() async { await restoreTask?.value }
+    func waitForIdentityVerification() async { await identityVerificationTask?.value }
+
+    /// Startup: the cached account id is only a hint. Re-check it against `/me.id` in the background; sync, adoption
+    /// and claims wait for the result (see `isIdentityVerified`). Failures to reach Graph leave it provisional.
+    private func startIdentityVerification() {
+        guard verifyIdentityAfterRestore, isAuthenticated, let cached = accountID, !cached.isEmpty,
+              !identityVerified, !identityMismatch, identityVerificationTask == nil else { return }
+        identityVerificationTask = Task { [weak self] in
+            guard let self else { return }
+            _ = try? await self.ensureAccountID()
+            self.identityVerificationTask = nil
+        }
+    }
     func waitForKeychainWork() async { await keychainWork?.value }
 
     private func finishRestore(_ result: KeychainProbe, generation: UUID) {
@@ -161,6 +186,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
         case .success, .notFound:
             applyStoredAuth()
             restoreState = .done
+            startIdentityVerification()
             if isAuthenticated { NotificationCenter.default.post(name: .requestModelContextSync, object: nil) }
         case .needsInteraction:
             restoreState = .needsConsent
@@ -179,6 +205,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
             userEmail = keychain.readString(key: kUserEmail)
             userName = keychain.readString(key: kUserName)
             accountID = keychain.readString(key: kAccountID).flatMap { $0.isEmpty ? nil : $0 }
+            identityVerified = false   // cached id = provisional until /me confirms it
+            identityMismatch = false
         }
         // No automatic developer-token-file import: sign-out must survive relaunch.
     }
@@ -218,6 +246,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
         identityTask?.cancel()
         identityTask = nil
         accountID = nil
+        identityVerified = false
+        identityMismatch = false
         isAuthenticated = false
         isAuthenticating = true
         lastAuthError = nil
@@ -460,7 +490,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
     // MARK: - User Profile
 
     func ensureAccountID() async throws -> String {
-        if let accountID, !accountID.isEmpty { return accountID }
+        if identityMismatch { throw Self.identityMismatchError }
+        if let accountID, !accountID.isEmpty, identityVerified { return accountID }
         let generation = sessionGeneration
         if let identityTask {
             let id = try await identityTask.value
@@ -474,6 +505,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
         try requireGeneration(generation)
         return id
     }
+
+    private static let identityMismatchError = NSError(domain: "AuthManager", code: -15, userInfo: [NSLocalizedDescriptionKey: "令牌所属的微软账号与本机记录的账号不一致，已暂停显示与同步；请退出后重新登录。未删除任何数据。"])
 
     private func resolveAccountID(generation: UUID) async throws -> String {
         try Task.checkCancellation()
@@ -491,11 +524,28 @@ final class AuthManager: NSObject, SyncAuthProviding {
         }
         let name = json["displayName"] as? String ?? ""
         let email = (json["mail"] as? String) ?? (json["userPrincipalName"] as? String) ?? ""
-        let saved = await keychain.updateAsync(strings: [kAccountID: id, kUserName: name, kUserEmail: email])
-        try requireGeneration(generation)
-        guard saved else {
-            throw NSError(domain: "AuthManager", code: -13, userInfo: [NSLocalizedDescriptionKey: "无法保存账号身份，已暂停同步。"])
+        if let cached = accountID, !cached.isEmpty, cached != id {
+            // The keychain/session claims account A but the token belongs to B. Do not adopt B silently and do not
+            // touch the keychain: treat the identity as unconfirmed (blocked scope, nothing shown or synced).
+            identityMismatch = true
+            identityVerified = false
+            accountID = nil
+            userName = nil
+            userEmail = nil
+            lastAuthError = Self.identityMismatchError.localizedDescription
+            NSLog("AUTH_FLOW phase=identity-mismatch")
+            throw Self.identityMismatchError
         }
+        let fresh = [kAccountID: id, kUserName: name, kUserEmail: email]
+        // Already-confirmed values need no keychain write (a write can raise a prompt on a rebuilt app).
+        if fresh.contains(where: { keychain.readString(key: $0.key) != $0.value }) {
+            let saved = await keychain.updateAsync(strings: fresh)
+            try requireGeneration(generation)
+            guard saved else {
+                throw NSError(domain: "AuthManager", code: -13, userInfo: [NSLocalizedDescriptionKey: "无法保存账号身份，已暂停同步。"])
+            }
+        }
+        identityVerified = true
         accountID = id
         userName = name
         userEmail = email
@@ -517,6 +567,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
         isAuthenticating = false
         isAuthenticated = false
         accountID = nil
+        identityVerified = false
+        identityMismatch = false
         userEmail = nil
         userName = nil
     }

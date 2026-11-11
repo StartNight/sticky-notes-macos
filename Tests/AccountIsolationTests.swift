@@ -490,4 +490,28 @@ final class AccountIsolationTests: XCTestCase {
         try await engine.uploadNote(m, token: "t", retryAuthOnFailure: false)
         XCTAssertFalse(m.recoveryBlocksAutomaticRecreate); XCTAssertEqual(m.syncStatus, .synced)
     }
+    // MARK: unverified (provisional cached) identity authorises nothing (follow-up #3)
+    func testUnverifiedIdentityBlocksSyncAdoptionClaimAndCopyUntilConfirmed() async throws {
+        signIn("A")
+        let local = add("local", owner: StickyNote.unlinkedOwnerMarker)
+        let legacy = add("legacy", owner: nil)
+        let legacyCloud = add("legacy-cloud", owner: nil, remote: "R-old")
+        let mine = add("mine", owner: "A"); mine.syncStatus = .pendingUpload
+        auth.isIdentityVerified = false
+        XCTAssertEqual(auth.activeScope, .account("A"), "本地仅显示缓存账号")
+        XCTAssertNil(try service.pendingPrompt(modelContext: context))
+        XCTAssertThrowsError(try service.adoptUnlinked(modelContext: context))
+        XCTAssertThrowsError(try service.claimLegacy(legacy, to: .currentAccount, modelContext: context))
+        XCTAssertThrowsError(try service.copyLegacyToCurrentAccount(legacyCloud, modelContext: context))
+        XCTAssertEqual(local.ownership, .unlinkedLocal)
+        XCTAssertEqual(legacy.ownership, .legacyUnknown)
+        MockURLProtocol.handler = { [self] in listReply($0) }
+        await engine.syncAll(modelContext: context)
+        XCTAssertTrue(MockURLProtocol.requests.isEmpty, "未复核身份：不得发任何 Graph 请求")
+        XCTAssertEqual(mine.syncStatus, .pendingUpload)
+        // 复核通过后恢复
+        auth.isIdentityVerified = true
+        XCTAssertNotNil(try service.pendingPrompt(modelContext: context))
+        XCTAssertNoThrow(try service.claimLegacy(legacy, to: .currentAccount, modelContext: context))
+    }
 }

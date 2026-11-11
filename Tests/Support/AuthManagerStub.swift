@@ -12,6 +12,7 @@ final class SyncAuthStub: SyncAuthProviding {
     func ensureAccountID() async throws -> String { accountID ?? "test-account" }
 
     var isAuthenticated: Bool = true
+    var isIdentityVerified: Bool = true
     var isAuthenticating: Bool = false
     var accessToken: String = "test-token"
     var refreshCallCount = 0
@@ -34,6 +35,7 @@ final class SyncAuthStub: SyncAuthProviding {
         accountID = "test-account"
         sessionGeneration = UUID()
         isAuthenticated = true
+        isIdentityVerified = true
         isAuthenticating = false
         accessToken = "test-token"
         refreshCallCount = 0

@@ -134,7 +134,7 @@ final class SyncEngine {
         let generation: UUID
     }
     private func currentScope() throws -> Scope {
-        guard authManager.isAuthenticated, let id = authManager.accountID, !id.isEmpty else {
+        guard authManager.isAuthenticated, authManager.isIdentityVerified, let id = authManager.accountID, !id.isEmpty else {
             throw NSError(domain: "SyncEngine", code: -20, userInfo: [NSLocalizedDescriptionKey: "账号身份未确认，已暂停同步。"])
         }
         return Scope(accountID: id, generation: authManager.sessionGeneration)

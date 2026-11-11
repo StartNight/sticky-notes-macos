@@ -59,8 +59,14 @@ final class AccountIsolationService {
 
     /// Prompt only for verified accounts, only for no-account notes this account has never been asked
     /// about. Legacy/quarantined data is NEVER offered here.
+    /// The scope's account id, but only once `/me.id` has confirmed it (a cached id is provisional at startup).
+    private func verifiedAccountID() throws -> String {
+        guard case .account(let id) = auth.activeScope, auth.isIdentityVerified else { throw IsolationError.notVerified }
+        return id
+    }
+
     func pendingPrompt(modelContext: ModelContext) throws -> AdoptionPrompt? {
-        guard case .account(let id) = auth.activeScope else { return nil }
+        guard case .account(let id) = auth.activeScope, auth.isIdentityVerified else { return nil }
         let notes = try modelContext.fetch(FetchDescriptor<StickyNote>())
         let known = ledger.decisions(for: id)
         let candidates = NoteScopeQuery.unlinked(notes).filter { known[$0.id] == nil }
@@ -69,7 +75,7 @@ final class AccountIsolationService {
     }
 
     private func requireCurrent(_ prompt: AdoptionPrompt) throws {
-        guard auth.activeScope == .account(prompt.accountID), auth.sessionGeneration == prompt.generation else {
+        guard auth.activeScope == .account(prompt.accountID), auth.isIdentityVerified, auth.sessionGeneration == prompt.generation else {
             throw IsolationError.stalePrompt
         }
     }
@@ -92,7 +98,7 @@ final class AccountIsolationService {
     /// Settings entry (always available while signed in & verified).
     @discardableResult
     func adoptUnlinked(ids: [UUID]? = nil, modelContext: ModelContext) throws -> Int {
-        guard case .account(let id) = auth.activeScope else { throw IsolationError.notVerified }
+        let id = try verifiedAccountID()
         let all = NoteScopeQuery.unlinked(try modelContext.fetch(FetchDescriptor<StickyNote>())).map(\.id)
         let chosen = ids.map { wanted in all.filter { wanted.contains($0) } } ?? all
         let count = try adopt(ids: chosen, accountID: id, modelContext: modelContext)
@@ -123,7 +129,7 @@ final class AccountIsolationService {
         }
         switch target {
         case .currentAccount:
-            guard case .account(let id) = auth.activeScope else { throw IsolationError.notVerified }
+            let id = try verifiedAccountID()
             note.ownerAccountID = id
             note.syncStatus = .pendingUpload
         case .noAccountLocal:
@@ -137,7 +143,7 @@ final class AccountIsolationService {
     @discardableResult
     func copyLegacyToCurrentAccount(_ note: StickyNote, modelContext: ModelContext) throws -> StickyNote {
         guard note.ownership == .legacyUnknown, !note.isDeleted else { throw IsolationError.notEligible("该便笺不在隔离区。") }
-        guard case .account(let id) = auth.activeScope else { throw IsolationError.notVerified }
+        let id = try verifiedAccountID()
         let copy = StickyNote(color: note.noteColor, content: note.plainTextContent, ownerAccountID: id, syncStatus: .pendingUpload)
         copy.attributedContentData = note.attributedContentData
         copy.audioRecordings = note.audioRecordings
