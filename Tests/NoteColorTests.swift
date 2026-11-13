@@ -175,4 +175,33 @@ final class NoteColorTests: XCTestCase {
         XCTAssertEqual(NoteConverter.extractNoteColor(fromExtendedProperties: blueClassic).color, .blue)
     }
 
+    // MARK: - 颜色同步诊断日志（默认关闭，只记打码 id 与颜色码）
+
+    func testDiagnosticsTagIsAStableShortHashAndNeverTheRawID() {
+        XCTAssertEqual(ColorDiagnostics.tag("abc"), "ba7816", "SHA-256(\"abc\") 的前 3 字节")
+        XCTAssertEqual(ColorDiagnostics.tag(nil), "-")
+        let id = "AAMkAGE1-secret-graph-object-id="
+        let tag = ColorDiagnostics.tag(id)
+        XCTAssertEqual(tag.count, 6)
+        XCTAssertFalse(id.contains(tag) || tag.contains("secret"))
+    }
+
+    func testRawColorCodesReportWhichFieldDecidedTheColour() {
+        let lid: [String: Any] = ["id": NoteConverter.pidLidNoteColorPropertyId, "value": "3"]
+        let web: [String: Any] = ["id": NoteConverter.webNoteJSONPropertyId, "value": "{\"color\":6}"]
+        let both = NoteConverter.rawColorCodes(fromExtendedProperties: [lid, web])
+        XCTAssertEqual(both.webCode, 6); XCTAssertEqual(both.lidCode, 3); XCTAssertEqual(both.source, "_Note")
+        let onlyLid = NoteConverter.rawColorCodes(fromExtendedProperties: [lid])
+        XCTAssertNil(onlyLid.webCode); XCTAssertEqual(onlyLid.lidCode, 3); XCTAssertEqual(onlyLid.source, "0x8B00")
+        let none = NoteConverter.rawColorCodes(fromExtendedProperties: [])
+        XCTAssertNil(none.webCode); XCTAssertNil(none.lidCode); XCTAssertEqual(none.source, "default(yellow)")
+        // 与真实解析一致：诊断只是旁路，结论必须相同
+        XCTAssertEqual(NoteConverter.extractNoteColor(fromExtendedProperties: [lid, web]).color, .charcoal)
+        XCTAssertEqual(NoteConverter.extractNoteColor(fromExtendedProperties: [lid]).color, .yellow)
+    }
+
+    func testDiagnosticsAreOffUnlessTheDefaultsKeyIsSet() {
+        XCTAssertFalse(ColorDiagnostics.enabled, "未设置 ColorDiagnosticsEnabled 时不得输出任何诊断")
+    }
+
 }

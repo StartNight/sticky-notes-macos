@@ -303,6 +303,7 @@ final class SyncEngine {
             )
             let noteColor = extracted.color
             let webNoteJSON = extracted.webNoteJSON
+            let colorProps = (msg["singleValueExtendedProperties"] as? [[String: Any]]) ?? []
 
             let existingLocal = localByRemoteId[remoteId]
             if (pendingRemoteDeletes[scope.accountID] ?? []).contains(remoteId) ||
@@ -318,6 +319,8 @@ final class SyncEngine {
                 // for explicit reconciliation; don't turn it into an auto-uploadable conflict copy.
                 if localNote.pendingCreateOperationID != nil || localNote.recoveryPaused || localNote.recoveryPendingDeleteID != nil || localNote.hasCorruptRecoveryJournal { continue }
                 // Note exists locally
+                ColorDiagnostics.pull(event: localNote.changeKey == changeKey ? "same-changeKey" : "changed",
+                                      remoteID: remoteId, local: localNote.noteColor, props: colorProps, resolved: noteColor)
                 if localNote.changeKey == changeKey {
                     // Still cache `_Note` JSON so a later color-only upload can merge into it.
                     if let webNoteJSON {
@@ -384,6 +387,7 @@ final class SyncEngine {
             } else {
                 if journalIsolated { skippedCloudCreates += 1; continue }
                 // New note from cloud
+                ColorDiagnostics.pull(event: "new-from-cloud", remoteID: remoteId, local: nil, props: colorProps, resolved: noteColor)
                 let newNote = StickyNote(
                     color: noteColor,
                     content: plainText,
@@ -499,6 +503,7 @@ final class SyncEngine {
         ]
 
         let jsonData = try JSONSerialization.data(withJSONObject: payload)
+        ColorDiagnostics.upload(event: note.remoteId == nil ? "create" : "patch", remoteID: note.remoteId, local: snapshot.color)
 
         if let remoteId = note.remoteId {
             guard let url = graphItemURL(collection: "me/notes", id: remoteId) else {
@@ -696,6 +701,7 @@ final class SyncEngine {
             }
         }
 
+        ColorDiagnostics.upload(event: isCreate ? "create-ok" : "patch-ok", remoteID: note.remoteId, local: snapshot.color)
         let unchanged = snapshot.matches(note) && !note.isDeletedLocally
         if unchanged { applyGraphTimestamps(json, to: note) }
         // Cache what was actually sent, never stamp a newer local color as already uploaded.

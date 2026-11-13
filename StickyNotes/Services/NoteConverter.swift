@@ -1,5 +1,7 @@
 import AppKit
 import Foundation
+import CryptoKit
+import os
 
 struct NoteConverter {
     // MARK: - HTML to NSAttributedString
@@ -294,6 +296,27 @@ struct NoteConverter {
         return (webColor ?? lidColor ?? .yellow, webJSON)
     }
 
+    /// 仅用于诊断：颜色判定所依据的原始线上值（不改变行为）。
+    /// `source` 表示由哪个字段决定颜色："_Note" | "0x8B00" | "default(yellow)"。
+    static func rawColorCodes(fromExtendedProperties props: [[String: Any]]) -> (webCode: Int?, lidCode: Int?, source: String) {
+        var web: Int?
+        var lid: Int?
+        for prop in props {
+            guard let propId = prop["id"] as? String, let value = prop["value"] as? String else { continue }
+            if isWebNoteJSONProperty(propId) {
+                if let data = value.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    if let v = obj["color"] as? Int { web = v }
+                    else if let v = obj["color"] as? NSNumber { web = v.intValue }
+                    else if let v = obj["color"] as? String { web = Int(v) }
+                }
+            } else if isPidLidNoteColorProperty(propId) {
+                lid = Int(value)
+            }
+        }
+        let source = web != nil ? "_Note" : (lid != nil ? "0x8B00" : "default(yellow)")
+        return (web, lid, source)
+    }
+
     // MARK: - Internal Helpers
 
     private static var defaultAttributes: [NSAttributedString.Key: Any] {
@@ -430,5 +453,36 @@ struct NoteConverter {
                 break
             }
         }
+    }
+}
+
+
+/// 可选的颜色同步诊断（统一日志，不记录正文、标题或 token）。
+/// 开启：defaults write com.shenanigans.sticky-notes ColorDiagnosticsEnabled -bool YES
+/// （每次调用时读取，无需重启；App 自己从不写这个键）
+/// 查看：log show --last 10m --info --predicate 'subsystem == "com.shenanigans.sticky-notes" AND category == "color-sync"'
+enum ColorDiagnostics {
+    private static let logger = Logger(subsystem: "com.shenanigans.sticky-notes", category: "color-sync")
+    static var enabled: Bool { UserDefaults.standard.bool(forKey: "ColorDiagnosticsEnabled") }
+
+    /// Graph 对象 id 的短且不可逆标签（SHA-256 前 6 位十六进制），用于在拉取/上传日志行之间对应同一条便笺，且不暴露原始 id。
+    static func tag(_ id: String?) -> String {
+        guard let id else { return "-" }
+        let digest = SHA256.hash(data: Data(id.utf8))
+        return digest.prefix(3).map { String(format: "%02x", $0) }.joined()
+    }
+    private static func code(_ v: Int?) -> String { v.map(String.init) ?? "-" }
+
+    /// 拉取到的每条云端便笺一行。`local` 是本次拉取改动之前的本地颜色（"-" 表示新建）。
+    static func pull(event: String, remoteID: String, local: NoteColor?, props: [[String: Any]], resolved: NoteColor) {
+        guard enabled else { return }
+        let raw = NoteConverter.rawColorCodes(fromExtendedProperties: props)
+        logger.notice("pull event=\(event, privacy: .public) id=\(tag(remoteID), privacy: .public) local=\(local?.rawValue ?? "-", privacy: .public) down_Note=\(code(raw.webCode), privacy: .public) down_0x8B00=\(code(raw.lidCode), privacy: .public) resolved=\(resolved.rawValue, privacy: .public) source=\(raw.source, privacy: .public) propsReturned=\(props.count, privacy: .public)")
+    }
+
+    /// 每次上传一行：发出去的本地颜色、`_Note.color` 与 0x8B00。
+    static func upload(event: String, remoteID: String?, local: NoteColor) {
+        guard enabled else { return }
+        logger.notice("upload event=\(event, privacy: .public) id=\(tag(remoteID), privacy: .public) local=\(local.rawValue, privacy: .public) up_Note=\(NoteConverter.webNoteColorCode(for: local), privacy: .public) up_0x8B00=\(NoteConverter.pidLidNoteColorCode(for: local), privacy: .public)")
     }
 }
