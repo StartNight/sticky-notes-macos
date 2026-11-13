@@ -242,33 +242,52 @@ final class SyncEngine {
         let expandClause = "singleValueExtendedProperties($filter=id eq '\(lidId)' or id eq '\(webId)')"
         let encodedExpand = expandClause.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? expandClause
         let urlString = "\(graphEndpoint)/me/mailFolders/notes/messages?$top=100&$orderby=lastModifiedDateTime%20desc&$select=id,changeKey,subject,body,createdDateTime,lastModifiedDateTime&$expand=\(encodedExpand)"
-        guard let url = URL(string: urlString) else { return }
+        guard let firstURL = URL(string: urlString) else { return }
+        var pageURL: URL? = firstURL
+        var activeToken = token
+        var didRetryAuth = !retryAuthOnFailure
+        var messages: [[String: Any]] = []
 
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let (data, response) = try await scopedData(for: request, scope: scope)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
-        }
-
-        if httpResponse.statusCode == 401 {
-            guard retryAuthOnFailure else {
-                throw NSError(domain: "SyncEngine", code: 401, userInfo: [NSLocalizedDescriptionKey: "Pull failed: unauthorized"])
+        // Graph caps page size and returns @odata.nextLink. Process every page before applying
+        // the pull so notes beyond the first 100 are imported and conflict decisions see a full set.
+        while let url = pageURL {
+            try validate(scope)
+            guard url.scheme == "https", url.host == "graph.microsoft.com" else {
+                throw syncError(-22, "Graph 返回了无效的分页地址，已停止同步。")
             }
-            let newToken = try await refreshedToken(scope: scope)
-            return try await pullNotes(token: newToken, modelContext: modelContext, scope: scope, retryAuthOnFailure: false)
-        }
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(activeToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        guard (200...299).contains(httpResponse.statusCode) else {
-            let err = "HTTP \(httpResponse.statusCode)"
-            throw NSError(domain: "SyncEngine", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "Pull failed: \(err)"])
-        }
-
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let messages = json["value"] as? [[String: Any]] else {
-            return
+            let (data, response) = try await scopedData(for: request, scope: scope)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw syncError(-1, "Invalid server response")
+            }
+            if httpResponse.statusCode == 401 {
+                guard !didRetryAuth else {
+                    throw NSError(domain: "SyncEngine", code: 401, userInfo: [NSLocalizedDescriptionKey: "Pull failed: unauthorized"])
+                }
+                activeToken = try await refreshedToken(scope: scope)
+                didRetryAuth = true
+                continue // Retry this page once with the refreshed token.
+            }
+            guard (200...299).contains(httpResponse.statusCode) else {
+                throw NSError(domain: "SyncEngine", code: httpResponse.statusCode,
+                              userInfo: [NSLocalizedDescriptionKey: "Pull failed: HTTP \(httpResponse.statusCode)"])
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let pageMessages = json["value"] as? [[String: Any]] else {
+                throw syncError(-23, "Graph 返回了无法解析的便笺列表。")
+            }
+            messages.append(contentsOf: pageMessages)
+            if let next = json["@odata.nextLink"] as? String {
+                guard let nextURL = URL(string: next) else {
+                    throw syncError(-22, "Graph 返回了无效的分页地址，已停止同步。")
+                }
+                pageURL = nextURL
+            } else {
+                pageURL = nil
+            }
         }
 
         // Fetch all local notes

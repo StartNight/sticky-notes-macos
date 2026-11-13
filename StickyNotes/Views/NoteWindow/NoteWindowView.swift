@@ -134,14 +134,33 @@ struct NoteWindowView: View {
 
     private func saveContent() {
         guard let note = liveNote else { return }
-        note.plainTextContent = plainText
-        note.attributedContentData = try? NSKeyedArchiver.archivedData(
+        guard let archivedText = try? NSKeyedArchiver.archivedData(
             withRootObject: attributedText,
             requiringSecureCoding: true
-        )
+        ) else {
+            SyncEngine.shared.state = .error("无法保存便笺格式；本次更改尚未同步。")
+            return
+        }
+        let previousText = note.plainTextContent
+        let previousAttributedText = note.attributedContentData
+        let previousModifiedAt = note.modifiedAt
+        let previousStatus = note.syncStatus
+        note.plainTextContent = plainText
+        note.attributedContentData = archivedText
         note.modifiedAt = Date()
         note.syncStatus = .pendingUpload
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            // Keep the user's edits in the editor state, but don't let a failed local commit
+            // become a cloud write. A later edit can retry the save.
+            note.plainTextContent = previousText
+            note.attributedContentData = previousAttributedText
+            note.modifiedAt = previousModifiedAt
+            note.syncStatus = previousStatus
+            SyncEngine.shared.state = .error("无法保存便笺：\(error.localizedDescription)")
+            return
+        }
         SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: modelContext)
     }
 
