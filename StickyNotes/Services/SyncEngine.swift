@@ -50,6 +50,8 @@ final class SyncEngine {
     }
 
     private let authManager: any SyncAuthProviding
+
+    private let colorLedger: ColorEditLedger
     private let graphEndpoint = "https://graph.microsoft.com/v1.0"
     private var debounceTasks: [UUID: Task<Void, Never>] = [:]
     private var debounceTokens: [UUID: UUID] = [:]
@@ -169,8 +171,10 @@ final class SyncEngine {
     }
 
 
-    init(authManager: any SyncAuthProviding = AuthManager.shared, debounceNanoseconds: UInt64 = 1_500_000_000) {
+    init(authManager: any SyncAuthProviding = AuthManager.shared, debounceNanoseconds: UInt64 = 1_500_000_000,
+         colorLedger: ColorEditLedger = .shared) {
         self.authManager = authManager
+        self.colorLedger = colorLedger
         self.debounceNanoseconds = debounceNanoseconds
         startPeriodicSync()
     }
@@ -355,6 +359,13 @@ final class SyncEngine {
                         copyNote.modifiedAt = localNote.modifiedAt
                         copyNote.syncStatus = .pendingUpload
                         modelContext.insert(copyNote)
+                        // 网页原色保护：副本是新的云端对象。只有用户在本地选过的颜色才会写入；
+                        // 否则只搬运缓存的云端 `_Note`（没有就不写）。主便笺随后取云端颜色，因此它自己的 dirty 标记不再适用。
+                        let wasDirty = colorLedger.isDirty(localNote.id)
+                        if wasDirty { colorLedger.markDirty(copyNote.id) } else { colorLedger.markCarry(copyNote.id) }
+                        colorLedger.clearDirty(localNote.id)
+                        ColorDiagnostics.guardDecision(path: "conflict-copy", remoteID: remoteId, dirty: wasDirty,
+                                                       policy: wasDirty ? "writeLocal" : "carryCached")
 
                         // Update current note with cloud content
                         localNote.plainTextContent = plainText
@@ -372,7 +383,8 @@ final class SyncEngine {
                         continue
                     }
                 } else {
-                    // No local modifications, cleanly update
+                    // 本地无未提交改动，用云端覆盖（云端颜色胜出；清除本地 dirty）
+                    colorLedger.clearDirty(localNote.id)
                     localNote.plainTextContent = plainText
                     let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
                     localNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
@@ -490,20 +502,23 @@ final class SyncEngine {
         let trimmedTitle = note.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let subject = trimmedTitle.isEmpty ? "New Note" : trimmedTitle
 
-        let payload: [String: Any] = [
+        // 网页原色保护：只有用户在本地选过的颜色（或没有云端对应物的全新对象）才写颜色属性。
+        // 其余情况一律不改网页原色。
+        let plan = colorPlan(for: note)
+        var payload: [String: Any] = [
             "subject": subject,
             "body": [
                 "contentType": "html",
                 "content": html
-            ],
-            "singleValueExtendedProperties": NoteConverter.graphColorExtendedProperties(
-                for: note.noteColor,
-                existingWebNoteJSON: note.webNoteJSON
-            )
+            ]
         ]
+        let colorProps = Self.colorProperties(for: plan, color: note.noteColor, cachedWebJSON: note.webNoteJSON)
+        if !colorProps.isEmpty { payload["singleValueExtendedProperties"] = colorProps }
+        ColorDiagnostics.guardDecision(path: note.remoteId == nil ? "create" : "patch", remoteID: note.remoteId,
+                                       dirty: colorLedger.isDirty(note.id), policy: plan.policy.rawValue)
 
         let jsonData = try JSONSerialization.data(withJSONObject: payload)
-        ColorDiagnostics.upload(event: note.remoteId == nil ? "create" : "patch", remoteID: note.remoteId, local: snapshot.color)
+        ColorDiagnostics.upload(event: note.remoteId == nil ? "create" : "patch", remoteID: note.remoteId, local: snapshot.color, sent: plan.sentToken)
 
         if let remoteId = note.remoteId {
             guard let url = graphItemURL(collection: "me/notes", id: remoteId) else {
@@ -533,7 +548,7 @@ final class SyncEngine {
             // PATCH /me/messages for non-draft notes. Recreate instead.
             if [400, 403, 404].contains(httpResponse.statusCode) {
                 guard !note.recoveryBlocksAutomaticRecreate else { throw syncError(-42, "关联对象更新失败；已禁止自动重建，请在待核对页明确确认。") }
-                try await replaceRemoteNote(note, token: token, scope: scope, payloadData: jsonData, uploadedHTML: html, snapshot: snapshot)
+                try await replaceRemoteNote(note, token: token, scope: scope, payloadData: jsonData, uploadedHTML: html, snapshot: snapshot, plan: plan)
                 return
             }
 
@@ -546,7 +561,7 @@ final class SyncEngine {
                 ])
             }
 
-            try finishUpload(note, data: data, uploadedHTML: html, isCreate: false, snapshot: snapshot)
+            try finishUpload(note, data: data, uploadedHTML: html, isCreate: false, snapshot: snapshot, plan: plan)
             // A verified 2xx PATCH proves the recovered binding is writable: the "no automatic recreate" guard
             // has served its purpose (S3-A). It stays on only while PATCH keeps failing.
             if note.recoveryBlocksAutomaticRecreate && note.syncStatus == .synced {
@@ -566,7 +581,7 @@ final class SyncEngine {
             }
 
             if [400, 403, 404].contains(httpResponse.statusCode) {
-                try await createNoteInMailFolder(note, token: token, scope: scope, payloadData: jsonData, uploadedHTML: html, snapshot: snapshot)
+                try await createNoteInMailFolder(note, token: token, scope: scope, payloadData: jsonData, uploadedHTML: html, snapshot: snapshot, plan: plan)
                 return
             }
 
@@ -579,16 +594,39 @@ final class SyncEngine {
                 ])
             }
 
-            try finishUpload(note, data: data, uploadedHTML: html, isCreate: true, snapshot: snapshot)
+            try finishUpload(note, data: data, uploadedHTML: html, isCreate: true, snapshot: snapshot, plan: plan)
         }
     }
 
     /// Mail.ReadWrite fallback: create a replacement note then delete the old one.
     /// PATCH /me/messages cannot persist body/subject on non-draft Outlook notes.
-    private func replaceRemoteNote(_ note: StickyNote, token: String, scope: Scope, payloadData: Data, uploadedHTML: String, snapshot: UploadSnapshot) async throws {
+    private func replaceRemoteNote(_ note: StickyNote, token: String, scope: Scope, payloadData: Data, uploadedHTML: String, snapshot: UploadSnapshot, plan suppliedPlan: ColorPlan) async throws {
         try requireUploadable(note, scope: scope)
         let oldId = note.remoteId
-        try await createNoteInMailFolder(note, token: token, scope: scope, payloadData: payloadData, uploadedHTML: uploadedHTML, snapshot: snapshot)
+        var plan = suppliedPlan
+        var payloadData = payloadData
+        if plan.policy != .writeLocal, let oldId {
+            // 用户没有改过颜色：替换对象必须把旧对象自己的颜色属性原封不动搬过来（此刻现读），绝不用本地（可能解错的）颜色。
+            let carried = await fetchServerColorProperties(remoteId: oldId, token: token, scope: scope)
+            try validate(scope)
+            if let carried {
+                payloadData = Self.replacingColorProperties(in: payloadData, with: carried.properties)
+                plan = ColorPlan(policy: .carryServer, carriedWebJSON: carried.webJSON)
+                ColorDiagnostics.guardDecision(path: "replace", remoteID: oldId, dirty: false, policy: "carryServer",
+                                               detail: carried.properties.isEmpty ? "server-has-no-colour" : "props=\(carried.properties.count)")
+            } else {
+                // 读不到旧对象：退回原样搬运缓存的云端 `_Note`，没有缓存就不写。
+                var cachedProps: [[String: Any]] = []
+                if let cached = note.webNoteJSON { cachedProps = [["id": NoteConverter.webNoteJSONPropertyId, "value": cached]] }
+                payloadData = Self.replacingColorProperties(in: payloadData, with: cachedProps)
+                plan = ColorPlan(policy: .carryCached, carriedWebJSON: nil)
+                ColorDiagnostics.guardDecision(path: "replace", remoteID: oldId, dirty: false, policy: "carryCached",
+                                               detail: note.webNoteJSON == nil ? "read-failed-no-cache" : "read-failed-cached_Note")
+            }
+        } else {
+            ColorDiagnostics.guardDecision(path: "replace", remoteID: oldId, dirty: true, policy: "writeLocal")
+        }
+        try await createNoteInMailFolder(note, token: token, scope: scope, payloadData: payloadData, uploadedHTML: uploadedHTML, snapshot: snapshot, plan: plan)
         if let oldId {
             // finishUpload durably journaled oldId before it replaced remoteId.
             try await performRemoteDelete(remoteId: oldId, token: token, scope: scope)
@@ -597,7 +635,7 @@ final class SyncEngine {
         }
     }
 
-    private func createNoteInMailFolder(_ note: StickyNote, token: String, scope: Scope, payloadData: Data, uploadedHTML: String, snapshot: UploadSnapshot) async throws {
+    private func createNoteInMailFolder(_ note: StickyNote, token: String, scope: Scope, payloadData: Data, uploadedHTML: String, snapshot: UploadSnapshot, plan: ColorPlan) async throws {
         try requireUploadable(note, scope: scope)
         guard let url = URL(string: "\(graphEndpoint)/me/mailFolders/notes/messages") else {
             note.syncStatus = .error
@@ -612,7 +650,7 @@ final class SyncEngine {
                 NSLocalizedDescriptionKey: "Failed to create note (HTTP \(httpResponse.statusCode)): \(responseBody)"
             ])
         }
-        try finishUpload(note, data: data, uploadedHTML: uploadedHTML, isCreate: true, snapshot: snapshot)
+        try finishUpload(note, data: data, uploadedHTML: uploadedHTML, isCreate: true, snapshot: snapshot, plan: plan)
     }
 
     private func sendCreate(_ note: StickyNote, url: URL, token: String, body: Data, scope: Scope) async throws -> (Data, HTTPURLResponse) {
@@ -648,7 +686,7 @@ final class SyncEngine {
 
     /// Never mark synced unless Graph returned a usable object. An empty 204/200
     /// or a 200 that echoes the old body is the false-success we must reject.
-    private func finishUpload(_ note: StickyNote, data: Data, uploadedHTML: String, isCreate: Bool, snapshot: UploadSnapshot) throws {
+    private func finishUpload(_ note: StickyNote, data: Data, uploadedHTML: String, isCreate: Bool, snapshot: UploadSnapshot, plan: ColorPlan) throws {
         guard !note.isDeleted else { throw syncError(-32, "便笺已从本地删除，停止写回。") }
         guard !data.isEmpty,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -701,14 +739,109 @@ final class SyncEngine {
             }
         }
 
-        ColorDiagnostics.upload(event: isCreate ? "create-ok" : "patch-ok", remoteID: note.remoteId, local: snapshot.color)
+        ColorDiagnostics.upload(event: isCreate ? "create-ok" : "patch-ok", remoteID: note.remoteId, local: snapshot.color, sent: plan.sentToken)
         let unchanged = snapshot.matches(note) && !note.isDeletedLocally
         if unchanged { applyGraphTimestamps(json, to: note) }
-        // Cache what was actually sent, never stamp a newer local color as already uploaded.
-        note.webNoteJSON = NoteConverter.webNoteJSON(setting: snapshot.color, existing: note.webNoteJSON)
+        // 只缓存实际发出去的内容。没写过的颜色不能当成「云端已是这个色」；
+        // 从云端原样搬来的颜色，继续保留云端自己的 `_Note`。
+        switch plan.policy {
+        case .writeLocal:
+            note.webNoteJSON = NoteConverter.webNoteJSON(setting: snapshot.color, existing: note.webNoteJSON)
+            // 若上传过程中用户又改了颜色，则保持 dirty。
+            if snapshot.color == note.noteColor { colorLedger.clearDirty(note.id) }
+        case .carryServer:
+            if let web = plan.carriedWebJSON { note.webNoteJSON = web }
+        case .omit, .carryCached:
+            break
+        }
+        colorLedger.clearCarry(note.id)
         note.syncStatus = unchanged ? .synced : .pendingUpload
         note.lastSyncedAt = Date()
         try saveDurably(note)
+    }
+
+    // MARK: - 网页原色保护
+
+    fileprivate enum ColorWritePolicy: String {
+        /// 写入本地颜色（`_Note` + 0x8B00）：用户选过，或没有云端对应物的全新对象。
+        case writeLocal
+        /// 不带任何颜色属性（PATCH 已有对象且用户未改色）。
+        case omit
+        /// 新对象不得自行推断颜色：原样搬运缓存的云端 `_Note`，没有就不写。
+        case carryCached
+        /// 替换后的新对象：搬运刚从云端读到的旧对象原始颜色属性。
+        case carryServer
+    }
+
+    fileprivate struct ColorPlan {
+        var policy: ColorWritePolicy
+        var carriedWebJSON: String? = nil
+        var sentToken: String {
+            switch policy {
+            case .writeLocal: return "local"
+            case .omit: return "none"
+            case .carryCached: return "cached_Note"
+            case .carryServer: return "server_copy"
+            }
+        }
+    }
+
+    fileprivate func colorPlan(for note: StickyNote) -> ColorPlan {
+        if colorLedger.isDirty(note.id) { return ColorPlan(policy: .writeLocal) }
+        if note.remoteId == nil {
+            return ColorPlan(policy: colorLedger.isCarry(note.id) ? .carryCached : .writeLocal)
+        }
+        return ColorPlan(policy: .omit)
+    }
+
+    fileprivate static func colorProperties(for plan: ColorPlan, color: NoteColor, cachedWebJSON: String?) -> [[String: Any]] {
+        switch plan.policy {
+        case .writeLocal:
+            return NoteConverter.graphColorExtendedProperties(for: color, existingWebNoteJSON: cachedWebJSON)
+        case .omit, .carryServer:
+            return []
+        case .carryCached:
+            guard let cachedWebJSON else { return [] }
+            return [["id": NoteConverter.webNoteJSONPropertyId, "value": cachedWebJSON]]
+        }
+    }
+
+    /// 替换（绝不合并）已编码 payload 里的颜色属性。
+    fileprivate static func replacingColorProperties(in data: Data, with properties: [[String: Any]]) -> Data {
+        guard var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return data }
+        var props = obj["singleValueExtendedProperties"] as? [[String: Any]] ?? []
+        props.removeAll { prop in
+            guard let id = prop["id"] as? String else { return false }
+            return NoteConverter.isPidLidNoteColorProperty(id) || NoteConverter.isWebNoteJSONProperty(id)
+        }
+        props.append(contentsOf: properties)
+        if props.isEmpty { obj.removeValue(forKey: "singleValueExtendedProperties") } else { obj["singleValueExtendedProperties"] = props }
+        return (try? JSONSerialization.data(withJSONObject: obj)) ?? data
+    }
+
+    /// 只读：云端对象自己的颜色属性，值原封不动。`nil` 表示读失败（不得猜测）；空列表表示云端对象本来就没有颜色属性。
+    fileprivate func fetchServerColorProperties(remoteId: String, token: String, scope: Scope) async -> (properties: [[String: Any]], webJSON: String?)? {
+        let lidId = NoteConverter.pidLidNoteColorPropertyId
+        let webId = NoteConverter.webNoteJSONPropertyId
+        let clause = "singleValueExtendedProperties($filter=id eq '\(lidId)' or id eq '\(webId)')"
+        guard let base = graphItemURL(collection: "me/messages", id: remoteId),
+              var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return nil }
+        components.queryItems = [URLQueryItem(name: "$select", value: "id"), URLQueryItem(name: "$expand", value: clause)]
+        guard let url = components.url else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        guard let (data, response) = try? await scopedData(for: request, scope: scope),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["id"] as? String == remoteId else { return nil }
+        var out: [[String: Any]] = []
+        var web: String?
+        for prop in (json["singleValueExtendedProperties"] as? [[String: Any]]) ?? [] {
+            guard let id = prop["id"] as? String, let value = prop["value"] as? String else { continue }
+            if NoteConverter.isWebNoteJSONProperty(id) { out.append(["id": webId, "value": value]); web = value }
+            else if NoteConverter.isPidLidNoteColorProperty(id) { out.append(["id": lidId, "value": value]) }
+        }
+        return (out, web)
     }
 
     /// Mail-folder notes sort more reliably as IPM.StickyNote with current received/sent times.

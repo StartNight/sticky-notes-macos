@@ -482,7 +482,7 @@ final class AccountIsolationTests: XCTestCase {
         }
         try await engine.uploadNote(n, token: "t", retryAuthOnFailure: false)
         XCTAssertEqual(n.remoteId, "R-replaced")
-        XCTAssertEqual(MockURLProtocol.requests.map(\.method), ["PATCH", "POST", "DELETE"])
+        XCTAssertEqual(MockURLProtocol.requests.map(\.method), ["PATCH", "GET", "POST", "DELETE"], "未改色：替换前只读旧对象的原始颜色属性")
         // verified 2xx PATCH clears the guard automatically
         let m = add("patch-ok", owner: "A", remote: "R-ok"); m.recoveryBlocksAutomaticRecreate = true; m.syncStatus = .pendingUpload
         MockURLProtocol.reset()

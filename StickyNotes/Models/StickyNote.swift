@@ -179,8 +179,11 @@ final class StickyNote {
 
     // MARK: - Mutations
 
-    func setColor(_ color: NoteColor) {
+    /// 用户在颜色选择器中的显式选择。将颜色标为「本地已改」，同步才可以向云端写颜色属性；
+    /// 其余写入路径都不会改动网页原色（见 `ColorEditLedger`）。
+    func setColor(_ color: NoteColor, ledger: ColorEditLedger = .shared) {
         noteColor = color
+        ledger.markDirty(id)
         modifiedAt = Date()
         syncStatus = .pendingUpload
     }
@@ -215,4 +218,50 @@ final class StickyNote {
         guard let remote else { return local }
         return max(local, remote)
     }
+}
+
+
+/// 记录两类便笺：用户在本地选过、但尚未送达云端的颜色（dirty）；以及尚未上传、必须原样搬运云端原色、不得推断的副本（carry）。
+///
+/// 刻意放在 UserDefaults，而不是 SwiftData 字段：库结构与 c34d2e7/f23e122 保持一致
+///（旧版本仍可直接打开同一库；无需迁移，也不会因打开失败而 fatalError）。
+/// 因此旧数据默认「不脏」。若台账丢失，失败方向是保守的：本地改色不会上传（绝不会用推断色覆盖网页原色）。
+final class ColorEditLedger: @unchecked Sendable {
+    static let shared = ColorEditLedger()
+    static let capacity = 2000
+    private static let dirtyKey = "ColorEditLedger.dirty.v1"
+    private static let carryKey = "ColorEditLedger.carry.v1"
+    private let defaults: UserDefaults
+    private let lock = NSLock()
+
+    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+
+    private func read(_ key: String) -> [String] { defaults.stringArray(forKey: key) ?? [] }
+    private func write(_ list: [String], _ key: String) {
+        defaults.set(Array(list.suffix(Self.capacity)), forKey: key)
+    }
+    private func add(_ id: UUID, to key: String, removingFrom other: String) {
+        lock.lock(); defer { lock.unlock() }
+        let value = id.uuidString
+        var mine = read(key)
+        if !mine.contains(value) { mine.append(value); write(mine, key) }
+        var theirs = read(other)
+        if theirs.contains(value) { theirs.removeAll { $0 == value }; write(theirs, other) }
+    }
+    private func remove(_ id: UUID, from key: String) {
+        lock.lock(); defer { lock.unlock() }
+        var list = read(key)
+        if list.contains(id.uuidString) { list.removeAll { $0 == id.uuidString }; write(list, key) }
+    }
+    private func contains(_ id: UUID, _ key: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return read(key).contains(id.uuidString)
+    }
+
+    func isDirty(_ id: UUID) -> Bool { contains(id, Self.dirtyKey) }
+    func isCarry(_ id: UUID) -> Bool { contains(id, Self.carryKey) }
+    func markDirty(_ id: UUID) { add(id, to: Self.dirtyKey, removingFrom: Self.carryKey) }
+    func markCarry(_ id: UUID) { add(id, to: Self.carryKey, removingFrom: Self.dirtyKey) }
+    func clearDirty(_ id: UUID) { remove(id, from: Self.dirtyKey) }
+    func clearCarry(_ id: UUID) { remove(id, from: Self.carryKey) }
 }

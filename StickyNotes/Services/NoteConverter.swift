@@ -480,9 +480,21 @@ enum ColorDiagnostics {
         logger.notice("pull event=\(event, privacy: .public) id=\(tag(remoteID), privacy: .public) local=\(local?.rawValue ?? "-", privacy: .public) down_Note=\(code(raw.webCode), privacy: .public) down_0x8B00=\(code(raw.lidCode), privacy: .public) resolved=\(resolved.rawValue, privacy: .public) source=\(raw.source, privacy: .public) propsReturned=\(props.count, privacy: .public)")
     }
 
-    /// 每次上传一行：发出去的本地颜色、`_Note.color` 与 0x8B00。
-    static func upload(event: String, remoteID: String?, local: NoteColor) {
+    /// 每次上传一行，记录实际发出去的颜色。
+    /// `sent` = "local"（用户改过色 / 全新便笺）| "none"（未带颜色属性）|
+    /// "cached_Note"（原样搬运缓存的云端 `_Note`）| "server_copy"（原样搬运刚读到的服务端原始属性）。
+    /// `up_*` 仅在 `sent=local` 时有意义。
+    static func upload(event: String, remoteID: String?, local: NoteColor, sent: String) {
         guard enabled else { return }
-        logger.notice("upload event=\(event, privacy: .public) id=\(tag(remoteID), privacy: .public) local=\(local.rawValue, privacy: .public) up_Note=\(NoteConverter.webNoteColorCode(for: local), privacy: .public) up_0x8B00=\(NoteConverter.pidLidNoteColorCode(for: local), privacy: .public)")
+        let note = sent == "local" ? String(NoteConverter.webNoteColorCode(for: local)) : "-"
+        let lid = sent == "local" ? String(NoteConverter.pidLidNoteColorCode(for: local)) : "-"
+        logger.notice("upload event=\(event, privacy: .public) id=\(tag(remoteID), privacy: .public) local=\(local.rawValue, privacy: .public) sent=\(sent, privacy: .public) up_Note=\(note, privacy: .public) up_0x8B00=\(lid, privacy: .public)")
+    }
+
+    /// 网页原色保护的每次判定一行。`path` = patch | create | replace | conflict-copy | pull-cloud-wins。
+    /// `policy` = writeLocal | omit | carryCached | carryServer；`detail` 是固定短标记（绝不含便笺正文）。
+    static func guardDecision(path: String, remoteID: String?, dirty: Bool, policy: String, detail: String = "-") {
+        guard enabled else { return }
+        logger.notice("guard path=\(path, privacy: .public) id=\(tag(remoteID), privacy: .public) dirty=\(dirty, privacy: .public) policy=\(policy, privacy: .public) detail=\(detail, privacy: .public)")
     }
 }
