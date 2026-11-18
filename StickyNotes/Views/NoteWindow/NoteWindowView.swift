@@ -40,6 +40,7 @@ struct NoteWindowView: View {
                         onAudioSaved: { data in
                             note.addAudioRecording(data)
                             try? modelContext.save()
+                            SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: modelContext)
                         },
                         onStartDictation: { startLiveDictation() },
                         onStopDictation: { stopLiveDictation() },
@@ -69,6 +70,7 @@ struct NoteWindowView: View {
                         onDelete: { index in
                             note.removeAudioRecording(at: index)
                             try? modelContext.save()
+                            SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: modelContext)
                         }
                     )
                 }
@@ -80,7 +82,6 @@ struct NoteWindowView: View {
                             x: note.windowX, y: note.windowY,
                             width: note.windowWidth, height: note.windowHeight
                         ),
-                        onWindowFound: { observeWindowChanges($0) },
                         onClose: {
                             audioRecorder.stopPlayback()
                             speechRecognizer.stopListening()
@@ -89,15 +90,28 @@ struct NoteWindowView: View {
                                 note.isOpen = false
                                 saveWindowPosition()
                             }
+                        },
+                        onFrameChanged: { frame in
+                            guard let note = liveNote else { return }
+                            note.windowX = Double(frame.origin.x)
+                            note.windowY = Double(frame.origin.y)
+                            note.windowWidth = Double(frame.size.width)
+                            note.windowHeight = Double(frame.size.height)
+                            try? modelContext.save()
                         }
                     )
                 )
             } else {
-                Text(String(localized: "Note not found"))
-                    .frame(width: 300, height: 200)
-                    // Out-of-scope (other account / signed out / identity unconfirmed) or deleted: close the window.
-                    // `isOpen` is deliberately untouched so the window returns when its scope is active again.
-                    .background(loaded ? AnyView(ScopeWindowCloser { windowManager.markClosed(noteID) }) : AnyView(EmptyView()))
+                if AuthManager.shared.isRestoringSession || AuthManager.shared.activeScope == .blocked {
+                    Color.clear
+                        .frame(width: 300, height: 200)
+                } else {
+                    Text(String(localized: "Note not found"))
+                        .frame(width: 300, height: 200)
+                        // Out-of-scope (other account / signed out / identity unconfirmed) or deleted: close the window.
+                        // `isOpen` is deliberately untouched so the window returns when its scope is active again.
+                        .background(loaded ? AnyView(ScopeWindowCloser { windowManager.markClosed(noteID) }) : AnyView(EmptyView()))
+                }
             }
         }
         .alert(String(localized: "Delete Note?"), isPresented: $showDeleteConfirmation) {
@@ -107,6 +121,30 @@ struct NoteWindowView: View {
             Text(String(localized: "This note will be permanently deleted."))
         }
         .onAppear { loadNote() }
+        .onChange(of: AuthManager.shared.activeScope) { _, newScope in
+            if newScope != .blocked { loadNote() }
+        }
+        .onChange(of: AuthManager.shared.restoreState) { _, newRestoreState in
+            if newRestoreState == .done { loadNote() }
+        }
+        .onChange(of: note?.modifiedAt) { _, _ in
+            syncFromModelIfExternalChange()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .formatBold)) { _ in
+            if editorProxy.textView?.window?.isKeyWindow == true {
+                editorProxy.toggleBold()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .formatItalic)) { _ in
+            if editorProxy.textView?.window?.isKeyWindow == true {
+                editorProxy.toggleItalic()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .formatUnderline)) { _ in
+            if editorProxy.textView?.window?.isKeyWindow == true {
+                editorProxy.toggleUnderline()
+            }
+        }
     }
 
     // MARK: - Data
@@ -126,10 +164,47 @@ struct NoteWindowView: View {
                           NSParagraphStyle.self, NSShadow.self, NSTextAttachment.self]
             if let restored = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: classes, from: data) as? NSAttributedString {
                 self.attributedText = restored
+            } else {
+                self.attributedText = NSAttributedString(string: found.plainTextContent)
             }
+        } else {
+            self.attributedText = NSAttributedString(string: found.plainTextContent)
         }
         self.plainText = found.plainTextContent
         windowManager.markOpened(noteID)
+    }
+
+    private func syncFromModelIfExternalChange() {
+        guard let note = liveNote else { return }
+        let isPlainDifferent = note.plainTextContent != self.plainText
+        var newAttributed: NSAttributedString?
+        var isAttributedDifferent = false
+
+        if let data = note.attributedContentData {
+            let classes = [NSAttributedString.self, NSFont.self, NSColor.self,
+                          NSParagraphStyle.self, NSShadow.self, NSTextAttachment.self]
+            if let restored = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: classes, from: data) as? NSAttributedString {
+                if !restored.isEqual(to: self.attributedText) {
+                    isAttributedDifferent = true
+                    newAttributed = restored
+                }
+            }
+        } else if !self.plainText.isEmpty || !self.attributedText.string.isEmpty {
+            let fallback = NSAttributedString(string: note.plainTextContent)
+            if !fallback.isEqual(to: self.attributedText) {
+                isAttributedDifferent = true
+                newAttributed = fallback
+            }
+        }
+
+        if isPlainDifferent || isAttributedDifferent {
+            self.plainText = note.plainTextContent
+            if let newAttributed {
+                self.attributedText = newAttributed
+            } else {
+                self.attributedText = NSAttributedString(string: note.plainTextContent)
+            }
+        }
     }
 
     private func saveContent() {
@@ -177,24 +252,6 @@ struct NoteWindowView: View {
         try? modelContext.save()
     }
 
-    private func observeWindowChanges(_ window: NSWindow) {
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.didMoveNotification, object: window, queue: .main
-        ) { _ in saveWindowPositionFromWindow(window) }
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.didResizeNotification, object: window, queue: .main
-        ) { _ in saveWindowPositionFromWindow(window) }
-    }
-
-    private func saveWindowPositionFromWindow(_ window: NSWindow) {
-        guard let note = liveNote else { return }
-        let frame = window.frame
-        note.windowX = Double(frame.origin.x)
-        note.windowY = Double(frame.origin.y)
-        note.windowWidth = Double(frame.size.width)
-        note.windowHeight = Double(frame.size.height)
-    }
-
     // MARK: - Dictation
 
     private func startLiveDictation() {
@@ -238,14 +295,12 @@ struct NoteWindowView: View {
     // MARK: - Create
 
     private func createNote() {
-        let color = NoteColor.allCases.randomElement() ?? .yellow
+        let rawColor = UserDefaults.standard.string(forKey: "defaultColor") ?? NoteColor.yellow.rawValue
+        let color = NoteColor.fromPersisted(rawColor)
         guard let newNote = StickyNote.make(in: AuthManager.shared.activeScope, color: color) else { NSSound.beep(); return }
         modelContext.insert(newNote)
         try? modelContext.save()
         openWindow(value: newNote.id)
-        if AuthManager.shared.activeScope.accountID != nil {
-            SyncEngine.shared.scheduleDebouncedPush(for: newNote.id, in: modelContext)
-        }
     }
 
     // MARK: - Delete

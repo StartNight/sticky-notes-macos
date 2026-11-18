@@ -30,6 +30,8 @@ targets:
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
         INFOPLIST_KEY_CFBundleDisplayName: "Sticky Notes"
         CODE_SIGN_ENTITLEMENTS: StickyNotes/StickyNotes.entitlements
+        CODE_SIGN_IDENTITY: "StickyNotes Local Code Signing"
+        CODE_SIGN_STYLE: Manual
         GENERATE_INFOPLIST_FILE: YES
         ENABLE_PREVIEWS: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

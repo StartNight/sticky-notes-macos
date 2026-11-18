@@ -30,6 +30,15 @@ final class SyncEngine {
             case .offline: return "bolt.horizontal.icloud"
             }
         }
+
+        var statusColor: Color {
+            switch self {
+            case .idle: return .green
+            case .syncing: return .blue
+            case .error: return .orange
+            case .offline: return .secondary
+            }
+        }
     }
 
     // MARK: - State
@@ -307,11 +316,13 @@ final class SyncEngine {
             }
         }
 
+        var seenRemoteIDs: Set<String> = []
         for msg in messages {
             guard let remoteId = msg["id"] as? String,
                   let changeKey = msg["changeKey"] as? String else {
                 continue
             }
+            seenRemoteIDs.insert(remoteId)
 
             let bodyObj = msg["body"] as? [String: Any]
             let htmlContent = (bodyObj?["content"] as? String) ?? ""
@@ -437,6 +448,25 @@ final class SyncEngine {
             }
         }
 
+        // Reconcile cloud deletions: any local note in this account scope that was synced
+        // to a remoteId but is absent from the full remote list has been deleted in the cloud.
+        for localNote in localNotes where localNote.ownerAccountID == scope.accountID {
+            guard let rId = localNote.remoteId, !rId.isEmpty, !seenRemoteIDs.contains(rId) else { continue }
+            guard localNote.syncStatus == .synced else { continue }
+            if localNote.isDeleted || localNote.isDeletedLocally { continue }
+            if localNote.hasCorruptSyncJournal || localNote.hasCorruptRecoveryJournal { continue }
+            if localNote.pendingCreateOperationID != nil || localNote.recoveryPaused ||
+                localNote.recoveryPendingDeleteID != nil || localNote.hasRecoveryHistory ||
+                !localNote.pendingCleanupRemoteIDs.isEmpty { continue }
+            if uploadingNoteIDs.contains(localNote.id) { continue }
+            debounceTasks[localNote.id]?.cancel()
+            debounceTasks.removeValue(forKey: localNote.id)
+            debounceTokens.removeValue(forKey: localNote.id)
+            colorLedger.clearDirty(localNote.id)
+            colorLedger.clearCarry(localNote.id)
+            modelContext.delete(localNote)
+        }
+
         try modelContext.save()
         skippedCloudCreateCount = skippedCloudCreates
     }
@@ -456,6 +486,7 @@ final class SyncEngine {
         var uploadFailures = 0
         for note in pendingNotes where note.ownerAccountID == scope.accountID {
             if note.isDeletedLocally || note.recoveryPaused || note.recoveryPendingDeleteID != nil || note.hasCorruptSyncJournal { continue }
+            if isUntouchedBlankNewNote(note) { continue }
             do {
                 try await uploadNote(note, token: token, scope: scope)
             } catch {
@@ -557,7 +588,7 @@ final class SyncEngine {
                 throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
             }
 
-            if (httpResponse.statusCode == 401 || httpResponse.statusCode == 403) && retryAuthOnFailure {
+            if httpResponse.statusCode == 401 && retryAuthOnFailure {
                 let newToken = try await refreshedToken(scope: scope)
                 return try await uploadLocked(note, token: newToken, retryAuthOnFailure: false, scope: scope)
             }
@@ -594,7 +625,7 @@ final class SyncEngine {
             }
             let (data, httpResponse) = try await sendCreate(note, url: notesURL, token: token, body: jsonData, scope: scope)
 
-            if (httpResponse.statusCode == 401 || httpResponse.statusCode == 403) && retryAuthOnFailure {
+            if httpResponse.statusCode == 401 && retryAuthOnFailure {
                 let newToken = try await refreshedToken(scope: scope)
                 return try await uploadLocked(note, token: newToken, retryAuthOnFailure: false, scope: scope)
             }
@@ -883,10 +914,17 @@ final class SyncEngine {
         return (try? JSONSerialization.data(withJSONObject: obj)) ?? data
     }
 
+    func isUntouchedBlankNewNote(_ note: StickyNote) -> Bool {
+        note.remoteId == nil &&
+        note.plainTextContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        note.audioRecordings.isEmpty &&
+        !colorLedger.isDirty(note.id)
+    }
+
     private func applyGraphTimestamps(_ json: [String: Any], to note: StickyNote) {
         let remoteModified = Self.plausibleGraphDate(json["lastModifiedDateTime"] as? String)
         note.modifiedAt = StickyNote.resolvedModifiedAt(local: note.modifiedAt, remote: remoteModified)
-        if let created = Self.plausibleGraphDate(json["createdDateTime"] as? String) {
+        if note.createdAt == Date.distantPast, let created = Self.plausibleGraphDate(json["createdDateTime"] as? String) {
             note.createdAt = created
         }
     }
@@ -1047,7 +1085,7 @@ final class SyncEngine {
             throw NSError(domain: "SyncEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
         }
 
-        if (httpResponse.statusCode == 401 || httpResponse.statusCode == 403) && retryAuthOnFailure {
+        if httpResponse.statusCode == 401 && retryAuthOnFailure {
             let newToken = try await refreshedToken(scope: scope)
             return try await performRemoteDelete(remoteId: remoteId, token: newToken, scope: scope, retryAuthOnFailure: false)
         }

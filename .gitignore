@@ -27,3 +27,9 @@ Package.resolved
 .DS_Store
 *.swp
 *~
+
+## Local Test & Distribution Artifacts
+dist/
+TEST_REPORT.md
+*.xcresult
+*.xcarchive

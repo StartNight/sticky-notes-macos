@@ -40,16 +40,24 @@ struct StickyNotesApp: App {
     init() {
         // App-level, independent of whether the notes-list window exists: asks about no-account notes once the
         // account identity is verified (see AdoptionPromptCoordinator).
-        let context = sharedContainer.mainContext
+        let context = Self.sharedContainer.mainContext
         AdoptionPromptCoordinator.shared.start(
             context: context,
             presenter: AppKitAdoptionPromptPresenter(),
             accountLabel: { AuthManager.shared.userEmail ?? AuthManager.shared.userName ?? String(localized: "this account") },
             afterAccept: { context in await SyncEngine.shared.syncAll(modelContext: context) }
         )
+
+        // Handle sync requests at the App level so background periodic sync and ⌘⇧S work
+        // reliably even when the notes list window is closed and only floating note windows are open.
+        NotificationCenter.default.addObserver(forName: .requestModelContextSync, object: nil, queue: .main) { _ in
+            Task { @MainActor in
+                await SyncEngine.shared.syncAll(modelContext: Self.sharedContainer.mainContext)
+            }
+        }
     }
 
-    let sharedContainer: ModelContainer = {
+    static let sharedContainer: ModelContainer = {
         let schema = Schema([StickyNote.self])
         // Use the sandboxed container path so we keep existing notes data
         let containerStore = FileManager.default.homeDirectoryForCurrentUser
@@ -79,7 +87,7 @@ struct StickyNotesApp: App {
                 .onAppear { activeWindowTracker.start() }
                 .background(ListWindowAccessor())
         }
-        .modelContainer(sharedContainer)
+        .modelContainer(Self.sharedContainer)
         .defaultSize(width: 320, height: 500)
         .commands {
             CommandGroup(replacing: .pasteboard) {
@@ -106,16 +114,14 @@ struct StickyNotesApp: App {
 
             CommandGroup(replacing: .newItem) {
                 Button(String(localized: "New Note")) {
-                    let context = sharedContainer.mainContext
-                    let color = NoteColor.allCases.randomElement() ?? .yellow
+                    let context = Self.sharedContainer.mainContext
+                    let rawColor = UserDefaults.standard.string(forKey: "defaultColor") ?? NoteColor.yellow.rawValue
+                    let color = NoteColor.fromPersisted(rawColor)
                     let scope = AuthManager.shared.activeScope
                     guard let note = StickyNote.make(in: scope, color: color) else { NSSound.beep(); return }
                     context.insert(note)
                     try? context.save()
                     openWindow(value: note.id)
-                    if scope.accountID != nil {
-                        SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: context)
-                    }
                 }
                 .keyboardShortcut("n", modifiers: .command)
             }
@@ -151,14 +157,14 @@ struct StickyNotesApp: App {
                     .environment(windowManager)
             }
         }
-        .modelContainer(sharedContainer)
+        .modelContainer(Self.sharedContainer)
         .defaultSize(width: 300, height: 350)
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
 
         Settings {
             SettingsView()
-                .modelContainer(sharedContainer)
+                .modelContainer(Self.sharedContainer)
         }
     }
 }

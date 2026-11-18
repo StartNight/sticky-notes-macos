@@ -65,11 +65,6 @@ struct NotesListView: View {
         } message: {
             Text(String(localized: "macOS may show the keychain prompt twice. Please choose Always Allow both times. Choosing Deny or Cancel deletes nothing, and the app will not ask again until you restart it."))
         }
-        .onReceive(NotificationCenter.default.publisher(for: .requestModelContextSync)) { _ in
-            Task {
-                await syncEngine.syncAll(modelContext: modelContext)
-            }
-        }
         .alert(String(localized: "Delete Note?"), isPresented: $showDeleteConfirmation) {
             Button(String(localized: "Cancel"), role: .cancel) { noteToDelete = nil }
             Button(String(localized: "Delete"), role: .destructive) {
@@ -196,7 +191,7 @@ struct NotesListView: View {
 
                     HStack(spacing: 4) {
                         Circle()
-                            .fill(syncEngine.state == .syncing ? .blue : (syncEngine.state == .error("") ? .orange : .green))
+                            .fill(syncEngine.state.statusColor)
                             .frame(width: 6, height: 6)
                         Text(syncEngine.state.displayText)
                             .font(.system(size: 11))
@@ -327,15 +322,13 @@ struct NotesListView: View {
     }
 
     private func createNote() {
-        let color = NoteColor.allCases.randomElement() ?? .yellow
+        let rawColor = UserDefaults.standard.string(forKey: "defaultColor") ?? NoteColor.yellow.rawValue
+        let color = NoteColor.fromPersisted(rawColor)
         // Owner is stamped at creation; nothing is created while identity is unconfirmed.
         guard let note = StickyNote.make(in: scope, color: color) else { NSSound.beep(); return }
         modelContext.insert(note)
         try? modelContext.save()
         openNote(note)
-        if scope.accountID != nil {
-            syncEngine.scheduleDebouncedPush(for: note.id, in: modelContext)
-        }
     }
 
     private func openNote(_ note: StickyNote) {

@@ -249,13 +249,21 @@ final class KeychainHelper: @unchecked Sendable {
     @discardableResult
     func update(strings: [String: String], requiredEpoch: Int? = nil) -> Bool {
         ioLock.lock(); defer { ioLock.unlock() }
-        let previous: [String: Data]? = withState {
-            guard hydrated, writable, requiredEpoch == nil || requiredEpoch == epoch else { return nil }
+        let (previous, changed): ([String: Data]?, Bool) = withState {
+            guard hydrated, writable, requiredEpoch == nil || requiredEpoch == epoch else { return (nil, false) }
             let old = cache
-            for (key, value) in strings { cache[key] = Data(value.utf8) }
-            return old
+            var didChange = false
+            for (key, value) in strings {
+                let data = Data(value.utf8)
+                if cache[key] != data {
+                    cache[key] = data
+                    didChange = true
+                }
+            }
+            return (old, didChange)
         }
         guard let previous else { return false }
+        if !changed { return true }
         if persistLocked() { return true }
         withState { cache = previous }
         return false

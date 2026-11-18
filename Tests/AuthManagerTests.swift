@@ -557,13 +557,76 @@ final class AuthManagerTests: XCTestCase {
 
     func testWithoutCooldownEveryNote403TriggersItsOwnRefresh_RootCauseOfTheBurst() async throws {
         let result = try await perNote403Storm(cooldown: 0)
-        XCTAssertEqual(result.uploaded, 3)
-        XCTAssertGreaterThanOrEqual(result.tokenCalls, 3, "根因复现：每条便笺的 403 各自触发一次刷新")
+        XCTAssertEqual(result.uploaded, 3, "三条便笺通过回退创建成功")
+        XCTAssertEqual(result.tokenCalls, 0, "403 不得触发令牌刷新与写钥匙串，直接走端点回退")
     }
 
     func testPerNote403StormNowRefreshesOnlyOnce() async throws {
         let result = try await perNote403Storm(cooldown: 60)
         XCTAssertEqual(result.uploaded, 3, "同步行为不变：三条仍走回退创建并成功")
-        XCTAssertEqual(result.tokenCalls, 1, "冷却内合并为一次刷新")
+        XCTAssertEqual(result.tokenCalls, 0, "403 不触发令牌刷新与写钥匙串")
+    }
+
+    func testResolveAccountIDRefreshesTokenOn401() async throws {
+        let backend = FakeKeychainBackend()
+        backend.seed([
+            "ms_access_token": "expired-access-token",
+            "ms_refresh_token": "valid-refresh-token",
+            "ms_token_expiry": "9999999999",
+            "ms_graph_account_id": "acct-test"
+        ])
+        let store = KeychainHelper(backend: backend)
+        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        await auth.waitForRestore()
+
+        var meCallCount = 0
+        MockURLProtocol.handler = { request in
+            if request.url?.host == "login.microsoftonline.com" {
+                return .http(status: 200, json: ["access_token": "fresh-access-token", "refresh_token": "valid-refresh-token", "expires_in": 3600])
+            }
+            if request.url?.path == "/v1.0/me" {
+                meCallCount += 1
+                if meCallCount == 1 {
+                    return .http(status: 401, json: ["error": ["code": "InvalidAuthenticationToken"]])
+                } else {
+                    return .http(status: 200, json: ["id": "acct-test", "displayName": "Tester", "mail": "tester@example.com"])
+                }
+            }
+            return .http(status: 200, json: [:])
+        }
+
+        let verifiedID = try await auth.ensureAccountID()
+        XCTAssertEqual(verifiedID, "acct-test")
+        XCTAssertTrue(auth.isIdentityVerified)
+        XCTAssertEqual(meCallCount, 2, "首次 401 后刷新 Token 并重试成功")
+    }
+
+    func testSignInDoesNotPersistPartialSessionIfMeFails() async throws {
+        let backend = FakeKeychainBackend()
+        let store = KeychainHelper(backend: backend)
+        let auth = AuthManager(keychain: store, defaults: defaults, loadStoredAuth: false)
+        auth.authSessionRunner = { [self] url, _ in callback(from: url) }
+
+        MockURLProtocol.handler = { request in
+            if request.url?.host == "login.microsoftonline.com" {
+                return .http(status: 200, json: ["access_token": "token-1", "refresh_token": "refresh-1", "expires_in": 3600])
+            }
+            if request.url?.path == "/v1.0/me" {
+                return .http(status: 500, json: ["error": "internal"])
+            }
+            return .http(status: 200, json: [:])
+        }
+
+        do {
+            try await auth.signIn()
+            XCTFail("signIn should fail when /me fails")
+        } catch {
+            // Expected
+        }
+
+        await auth.waitForKeychainWork()
+        XCTAssertNil(store.readString(key: "ms_access_token"), "未通过身份核对时钥匙串不得残留半成品会话")
+        XCTAssertNil(store.readString(key: "ms_graph_account_id"))
+        XCTAssertFalse(auth.isAuthenticated)
     }
 }

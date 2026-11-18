@@ -957,4 +957,86 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertFalse(Schema([StickyNote.self]).entities.first!.properties.map(\.name).contains { $0.lowercased().contains("dirty") },
                        "标记不进 SwiftData 存储，库结构与 c34d2e7/f23e122 完全一致")
     }
+
+    func testCloudDeletedNoteIsDeletedLocallyOnPull() async throws {
+        let note = StickyNote(color: .yellow, content: "Note to delete", remoteId: "R-CLOUD-DEL", changeKey: "CK-1", syncStatus: .synced)
+        insertOwned(note)
+        try ctx.save()
+
+        MockURLProtocol.handler = { req in
+            if req.httpMethod == "GET" && req.url?.path.contains("messages") == true {
+                // Cloud returns empty list, meaning note was deleted in the cloud
+                return .http(status: 200, json: ["value": []])
+            }
+            return .http(status: 200, json: [:])
+        }
+
+        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        await engine.syncAll(modelContext: ctx)
+
+        let remaining = try ctx.fetch(FetchDescriptor<StickyNote>())
+        XCTAssertTrue(remaining.filter { $0.remoteId == "R-CLOUD-DEL" }.isEmpty, "云端已删除的便笺在本地必须同步删除")
+    }
+
+    func testUntouchedBlankNewNoteIsNotPushedUntilEdited() async throws {
+        let blank = StickyNote(color: .yellow, content: "")
+        insertOwned(blank)
+        try ctx.save()
+
+        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        XCTAssertTrue(engine.isUntouchedBlankNewNote(blank), "新建空便笺应判定为 untouched")
+
+        var postCount = 0
+        MockURLProtocol.handler = { req in
+            if req.httpMethod == "GET" { return .http(status: 200, json: ["value": []]) }
+            if req.httpMethod == "POST" {
+                postCount += 1
+                return .http(status: 201, json: ["id": "R-NEW", "changeKey": "CK-NEW"])
+            }
+            return .http(status: 200, json: [:])
+        }
+
+        await engine.syncAll(modelContext: ctx)
+        XCTAssertEqual(postCount, 0, "未触碰的空白便笺不得自动上传")
+        XCTAssertNil(blank.remoteId)
+
+        // Now edit text
+        blank.plainTextContent = "Now has text"
+        XCTAssertFalse(engine.isUntouchedBlankNewNote(blank), "输入正文后不再视为 untouched")
+
+        await engine.syncAll(modelContext: ctx)
+        XCTAssertEqual(postCount, 1, "输入正文后正常触发上传")
+        XCTAssertEqual(blank.remoteId, "R-NEW")
+    }
+
+    func testApplyGraphTimestampsDoesNotOverwriteOriginalCreatedAtOnUpdate() async throws {
+        let originalDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let note = StickyNote(color: .yellow, content: "Existing Note", remoteId: "R-EXISTING", changeKey: "CK-1", syncStatus: .pendingUpload)
+        note.createdAt = originalDate
+        insertOwned(note)
+        try ctx.save()
+
+        MockURLProtocol.handler = { req in
+            if req.httpMethod == "PATCH" {
+                // Server 403 fallback to recreate
+                return .http(status: 403, json: ["error": "forbidden"])
+            }
+            if req.httpMethod == "POST" {
+                return .http(status: 201, json: [
+                    "id": "R-NEW-MSG",
+                    "changeKey": "CK-NEW-MSG",
+                    "createdDateTime": "2030-01-01T12:00:00Z",
+                    "lastModifiedDateTime": "2030-01-01T12:05:00Z",
+                    "body": ["contentType": "html", "content": "<div>Existing Note</div>"]
+                ])
+            }
+            if req.httpMethod == "GET" { return .http(status: 200, json: ["value": []]) }
+            return .http(status: 200, json: [:])
+        }
+
+        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        await engine.syncAll(modelContext: ctx)
+
+        XCTAssertEqual(note.createdAt, originalDate, "替换更新不得篡改原本地创建时间")
+    }
 }

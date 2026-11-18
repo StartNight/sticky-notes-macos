@@ -62,10 +62,16 @@ struct NoteTextEditor: NSViewRepresentable {
         if context.coordinator.isUpdatingFromUI { return }
 
         let currentText = textView.attributedString()
-        if currentText.string != attributedText.string {
-            let selectedRanges = textView.selectedRanges
+        if !currentText.isEqual(to: attributedText) {
+            let newLength = attributedText.length
+            let clampedRanges = textView.selectedRanges.compactMap { value -> NSValue? in
+                let range = value.rangeValue
+                let safeLocation = min(range.location, newLength)
+                let safeLength = min(range.length, max(0, newLength - safeLocation))
+                return NSValue(range: NSRange(location: safeLocation, length: safeLength))
+            }
             textView.textStorage?.setAttributedString(attributedText)
-            textView.selectedRanges = selectedRanges
+            textView.selectedRanges = clampedRanges.isEmpty ? [NSValue(range: NSRange(location: newLength, length: 0))] : clampedRanges
         }
     }
 

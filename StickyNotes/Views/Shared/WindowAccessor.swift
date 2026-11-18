@@ -6,19 +6,22 @@ struct WindowAccessor: NSViewRepresentable {
     let onWindowFound: ((NSWindow) -> Void)?
     let onClose: (() -> Void)?
     let windowFrame: NSRect?
+    let onFrameChanged: ((NSRect) -> Void)?
 
     init(
         noteID: UUID? = nil,
         noteColor: NoteColor = .yellow,
         windowFrame: NSRect? = nil,
         onWindowFound: ((NSWindow) -> Void)? = nil,
-        onClose: (() -> Void)? = nil
+        onClose: (() -> Void)? = nil,
+        onFrameChanged: ((NSRect) -> Void)? = nil
     ) {
         self.noteID = noteID
         self.noteColor = noteColor
         self.windowFrame = windowFrame
         self.onWindowFound = onWindowFound
         self.onClose = onClose
+        self.onFrameChanged = onFrameChanged
     }
 
     func makeNSView(context: Context) -> NSView {
@@ -82,6 +85,18 @@ struct WindowAccessor: NSViewRepresentable {
 
         func windowWillClose(_ notification: Notification) {
             parent.onClose?()
+        }
+
+        func windowDidMove(_ notification: Notification) {
+            if let window = notification.object as? NSWindow {
+                parent.onFrameChanged?(window.frame)
+            }
+        }
+
+        func windowDidResize(_ notification: Notification) {
+            if let window = notification.object as? NSWindow {
+                parent.onFrameChanged?(window.frame)
+            }
         }
     }
 }

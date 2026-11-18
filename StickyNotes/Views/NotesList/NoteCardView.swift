@@ -64,6 +64,7 @@ struct NoteCardView: View {
                     Button {
                         note.setColor(color)
                         if let context = note.modelContext {
+                            try? context.save()
                             SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: context)
                         }
                     } label: {

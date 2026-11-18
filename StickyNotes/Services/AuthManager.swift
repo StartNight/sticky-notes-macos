@@ -326,10 +326,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
             throw NSError(domain: "AuthManager", code: -6, userInfo: [NSLocalizedDescriptionKey: "No authorization code returned"])
         }
 
-        // 5. Exchange code for access & refresh tokens
+        // 5. Exchange code for access & refresh tokens and verify identity before writing to keychain once
         try await exchangeAuthCode(authCode, codeVerifier: codeVerifier)
-        try requireGeneration(generation)
-        _ = try await ensureAccountID()
         try requireGeneration(generation)
         defaults.set(false, forKey: "ms_explicitly_signed_out")
         } catch {
@@ -390,8 +388,18 @@ final class AuthManager: NSObject, SyncAuthProviding {
             throw NSError(domain: "AuthManager", code: -9, userInfo: [NSLocalizedDescriptionKey: "Invalid token response format"])
         }
 
+        let (meData, meResponse) = try await fetchMeProfile(token: accessToken)
+        try requireGeneration(generation)
+        guard (meResponse as? HTTPURLResponse)?.statusCode == 200,
+              let meJSON = try JSONSerialization.jsonObject(with: meData) as? [String: Any],
+              let id = meJSON["id"] as? String, !id.isEmpty else {
+            throw NSError(domain: "AuthManager", code: -14, userInfo: [NSLocalizedDescriptionKey: "无法确认微软账号身份，已暂停同步。"])
+        }
+        let name = meJSON["displayName"] as? String ?? ""
+        let email = (meJSON["mail"] as? String) ?? (meJSON["userPrincipalName"] as? String) ?? ""
+
         var values = [kAccessToken: accessToken, kRefreshToken: json["refresh_token"] as? String ?? "",
-                      kAccountID: "", kUserEmail: "", kUserName: ""]
+                      kAccountID: id, kUserEmail: email, kUserName: name]
         let seconds = (json["expires_in"] as? Double) ?? 3600
         values[kTokenExpiry] = String(Date().addingTimeInterval(seconds).timeIntervalSince1970)
         let saved = await keychain.replaceSessionAsync(strings: values)
@@ -401,6 +409,11 @@ final class AuthManager: NSObject, SyncAuthProviding {
         }
 
         self.isAuthenticated = true
+        self.identityVerified = true
+        self.identityMismatch = false
+        self.accountID = id
+        self.userName = name
+        self.userEmail = email
     }
 
     // MARK: - Token Refresh & Acquisition
@@ -561,15 +574,25 @@ final class AuthManager: NSObject, SyncAuthProviding {
 
     private static let identityMismatchError = NSError(domain: "AuthManager", code: -15, userInfo: [NSLocalizedDescriptionKey: "令牌所属的微软账号与本机记录的账号不一致，已暂停显示与同步；请退出后重新登录。未删除任何数据。"])
 
+    private func fetchMeProfile(token: String) async throws -> (Data, URLResponse) {
+        var request = URLRequest(url: URL(string: "https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName")!)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return try await network.data(for: request)
+    }
+
     private func resolveAccountID(generation: UUID) async throws -> String {
         try Task.checkCancellation()
         try requireGeneration(generation)
-        let token = try await getValidAccessToken()
+        var token = try await getValidAccessToken()
         try requireGeneration(generation)
-        var request = URLRequest(url: URL(string: "https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName")!)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await network.data(for: request)
+        var (data, response) = try await fetchMeProfile(token: token)
         try requireGeneration(generation)
+        if (response as? HTTPURLResponse)?.statusCode == 401 {
+            token = try await refreshTokens()
+            try requireGeneration(generation)
+            (data, response) = try await fetchMeProfile(token: token)
+            try requireGeneration(generation)
+        }
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = json["id"] as? String, !id.isEmpty else {
