@@ -121,16 +121,47 @@ final class NoteColorTests: XCTestCase {
             (.blue, 4), (.gray, 5), (.charcoal, 6)
         ] {
             let props = NoteConverter.graphColorExtendedProperties(for: color, existingWebNoteJSON: nil)
-            XCTAssertEqual(props.count, 2)
+            XCTAssertEqual(props.count, 3)
             XCTAssertEqual(props[0]["id"] as? String, NoteConverter.pidLidNoteColorPropertyId)
             XCTAssertEqual(props[0]["value"] as? String, "\(NoteConverter.pidLidNoteColorCode(for: color))", "\(color.rawValue) PidLid")
-            XCTAssertEqual(props[1]["id"] as? String, NoteConverter.webNoteJSONPropertyId)
-            let json = try XCTUnwrap(props[1]["value"] as? String)
+            XCTAssertEqual(props[1]["id"] as? String, NoteConverter.pidTagIconIndexPropertyId)
+            XCTAssertEqual(props[1]["value"] as? String, "\(NoteConverter.pidTagIconIndex(for: color))", "\(color.rawValue) IconIndex")
+            XCTAssertEqual(props[2]["id"] as? String, NoteConverter.webNoteJSONPropertyId)
+            let json = try XCTUnwrap(props[2]["value"] as? String)
             XCTAssertEqual(NoteConverter.noteColor(fromWebNoteJSON: json), color)
             let data = try XCTUnwrap(json.data(using: .utf8))
             let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
             XCTAssertEqual(obj["color"] as? Int, code, "\(color.rawValue) 的 _Note.color")
         }
+    }
+
+    func testPidTagIconIndexMatchesMSOxonoteFormula() {
+        XCTAssertEqual(NoteConverter.pidTagIconIndex(for: .blue), 0x300)     // 768
+        XCTAssertEqual(NoteConverter.pidTagIconIndex(for: .green), 0x301)    // 769
+        XCTAssertEqual(NoteConverter.pidTagIconIndex(for: .pink), 0x302)     // 770
+        XCTAssertEqual(NoteConverter.pidTagIconIndex(for: .yellow), 0x303)   // 771
+        XCTAssertEqual(NoteConverter.pidTagIconIndex(for: .gray), 0x304)     // 772
+        XCTAssertEqual(NoteConverter.pidTagIconIndex(for: .purple), 0x304)   // 772
+        XCTAssertEqual(NoteConverter.pidTagIconIndex(for: .charcoal), 0x304) // 772
+    }
+
+    func testIsIncompleteWebNoteJSONDetection() {
+        XCTAssertFalse(NoteConverter.isIncompleteWebNoteJSON(nil))
+        XCTAssertFalse(NoteConverter.isIncompleteWebNoteJSON(""))
+        XCTAssertFalse(NoteConverter.isIncompleteWebNoteJSON("invalid json"))
+
+        // Old 84-byte JSON missing document:
+        let legacy = "{\"schemaVersion\":\"beta\",\"#type.color\":\"Int32\",\"color\":3,\"color@Is.Queryable\":\"True\"}"
+        XCTAssertTrue(NoteConverter.isIncompleteWebNoteJSON(legacy))
+        XCTAssertTrue(NoteConverter.isLegacyMacAuthoredIncompleteNoteJSON(legacy))
+
+        // Complete JSON with document:
+        let complete = "{\"schemaVersion\":\"beta\",\"color\":3,\"document\":{\"type\":\"document\",\"blocks\":[{\"type\":\"paragraph\"}]}}"
+        XCTAssertFalse(NoteConverter.isIncompleteWebNoteJSON(complete))
+        XCTAssertTrue(NoteConverter.hasCompleteSubstrateDocument(complete))
+        XCTAssertFalse(NoteConverter.isLegacyMacAuthoredIncompleteNoteJSON(complete))
+        XCTAssertFalse(NoteConverter.isLegacyMacAuthoredIncompleteNoteJSON(nil))
+        XCTAssertFalse(NoteConverter.isLegacyMacAuthoredIncompleteNoteJSON("{\"color\":1}"))
     }
 
     func testOfficialLightHexMatchesWindowsStickyNotes() {
@@ -202,6 +233,31 @@ final class NoteColorTests: XCTestCase {
 
     func testDiagnosticsAreOffUnlessTheDefaultsKeyIsSet() {
         XCTAssertFalse(ColorDiagnostics.enabled, "未设置 ColorDiagnosticsEnabled 时不得输出任何诊断")
+    }
+
+    func testWebNoteJSONBuildsSubstrateDocumentWhenMissing() throws {
+        let localID = UUID()
+        let jsonStr = NoteConverter.webNoteJSON(
+            setting: .purple,
+            existing: nil,
+            plainText: "line 1\nline 2",
+            localID: localID
+        )
+        let data = try XCTUnwrap(jsonStr.data(using: .utf8))
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(obj["schemaVersion"] as? String, "beta")
+        XCTAssertEqual(obj["color"] as? Int, 3)
+        XCTAssertEqual(obj["#type.color"] as? String, "Int32")
+        XCTAssertEqual(obj["color@Is.Queryable"] as? String, "True")
+        XCTAssertEqual(obj["createdWithLocalId"] as? String, localID.uuidString.lowercased())
+        XCTAssertEqual(obj["createdByApp"] as? String, "StickyNotes")
+        XCTAssertNotNil(obj["documentModifiedAt"] as? String)
+        let document = try XCTUnwrap(obj["document"] as? [String: Any])
+        XCTAssertEqual(document["type"] as? String, "document")
+        let blocks = try XCTUnwrap(document["blocks"] as? [[String: Any]])
+        XCTAssertEqual(blocks.count, 2)
+        let firstContent = try XCTUnwrap(blocks[0]["content"] as? [[String: Any]])
+        XCTAssertEqual(firstContent.first?["text"] as? String, "line 1")
     }
 
 }

@@ -731,7 +731,7 @@ final class SyncEngineTests: XCTestCase {
         (body?["singleValueExtendedProperties"] as? [[String: Any]]) ?? []
     }
     nonisolated private func colourOnly(_ props: [[String: Any]]) -> [[String: Any]] {
-        props.filter { ($0["id"] as? String).map { NoteConverter.isPidLidNoteColorProperty($0) || NoteConverter.isWebNoteJSONProperty($0) } ?? false }
+        props.filter { ($0["id"] as? String).map { NoteConverter.isPidLidNoteColorProperty($0) || NoteConverter.isWebNoteJSONProperty($0) || NoteConverter.isPidTagIconIndexProperty($0) } ?? false }
     }
 
     func testPatchWithoutLocalColourChangeSendsNoColourPropertiesAndKeepsTheCachedWebJSON() async throws {
@@ -999,6 +999,8 @@ final class SyncEngineTests: XCTestCase {
         await engine.syncAll(modelContext: ctx)
         XCTAssertEqual(postCount, 0, "未触碰的空白便笺不得自动上传")
         XCTAssertNil(blank.remoteId)
+        XCTAssertEqual(engine.state, .idle, "未触碰空白便笺不应把同步状态标为错误")
+        XCTAssertEqual(engine.incompleteTaskCount, 0)
 
         // Now edit text
         blank.plainTextContent = "Now has text"
@@ -1007,6 +1009,25 @@ final class SyncEngineTests: XCTestCase {
         await engine.syncAll(modelContext: ctx)
         XCTAssertEqual(postCount, 1, "输入正文后正常触发上传")
         XCTAssertEqual(blank.remoteId, "R-NEW")
+    }
+
+    func testSameChangeKeyPullHealsSyncedLocalColor() async throws {
+        let local = StickyNote(color: .gray, content: "same", remoteId: "R-HEAL", changeKey: "CK-SAME", syncStatus: .synced)
+        insertOwned(local)
+        try ctx.save()
+
+        MockURLProtocol.handler = { req in
+            if req.httpMethod == "GET" {
+                return .http(status: 200, json: ["value": [self.message(id: "R-HEAL", changeKey: "CK-SAME", html: "<div>same</div>", color: 3)]])
+            }
+            return .http(status: 200, json: [:])
+        }
+
+        let ledger = isolatedLedger()
+        let engine = SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger)
+        await engine.syncAll(modelContext: ctx)
+
+        XCTAssertEqual(local.noteColor, .purple, "已同步且本地未改色的便笺在同 changeKey 拉取时应按云端校正颜色")
     }
 
     func testApplyGraphTimestampsDoesNotOverwriteOriginalCreatedAtOnUpdate() async throws {
@@ -1038,5 +1059,52 @@ final class SyncEngineTests: XCTestCase {
         await engine.syncAll(modelContext: ctx)
 
         XCTAssertEqual(note.createdAt, originalDate, "替换更新不得篡改原本地创建时间")
+    }
+
+    func testHealIncompleteSubstrateNotesUpgradesLegacyMacAuthoredNotesAndUploads() async throws {
+        let legacyJSON = "{\"schemaVersion\":\"beta\",\"#type.color\":\"Int32\",\"color\":3,\"color@Is.Queryable\":\"True\"}"
+        let note = StickyNote(color: .purple, content: "legacy mac note", remoteId: "R-LEGACY", changeKey: "CK1", syncStatus: .synced)
+        note.webNoteJSON = legacyJSON
+        insertOwned(note)
+        try ctx.save()
+
+        MockURLProtocol.handler = { req in
+            if req.httpMethod == "GET" {
+                return .http(status: 200, json: ["value": [
+                    [
+                        "id": "R-LEGACY",
+                        "changeKey": "CK1",
+                        "subject": "legacy mac note",
+                        "body": ["contentType": "html", "content": "<div>legacy mac note</div>"],
+                        "createdDateTime": "2026-01-01T00:00:00Z",
+                        "lastModifiedDateTime": "2026-01-01T00:00:00Z",
+                        "singleValueExtendedProperties": [
+                            ["id": NoteConverter.pidLidNoteColorPropertyId, "value": "4"],
+                            ["id": NoteConverter.webNoteJSONPropertyId, "value": legacyJSON]
+                        ]
+                    ]
+                ]])
+            }
+            if req.httpMethod == "PATCH" {
+                return .http(status: 200, json: ["id": "R-LEGACY", "changeKey": "CK2", "body": ["content": "<div>legacy mac note</div>"]])
+            }
+            return .http(status: 400, json: [:])
+        }
+
+        let ledger = isolatedLedger()
+        let engine = SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger)
+        await engine.syncAll(modelContext: ctx)
+
+        XCTAssertEqual(note.syncStatus, .synced)
+        XCTAssertTrue(NoteConverter.hasCompleteSubstrateDocument(note.webNoteJSON), "遗留残缺笔记在同步时被成功升级为完整 Substrate document")
+
+        let patch = try XCTUnwrap(MockURLProtocol.requests.first { $0.method == "PATCH" })
+        let body = try XCTUnwrap(self.bodyJSON(patch))
+        let props = try XCTUnwrap(body["singleValueExtendedProperties"] as? [[String: Any]])
+        XCTAssertTrue(props.contains { ($0["id"] as? String) == NoteConverter.pidTagIconIndexPropertyId }, "上传时必须携带 PidTagIconIndex (0x1080)")
+        XCTAssertTrue(props.contains { ($0["id"] as? String) == NoteConverter.pidLidNoteColorPropertyId }, "上传时必须携带 PidLidNoteColor (0x8B00)")
+        let webProp = try XCTUnwrap(props.first { ($0["id"] as? String) == NoteConverter.webNoteJSONPropertyId })
+        let webVal = try XCTUnwrap(webProp["value"] as? String)
+        XCTAssertTrue(NoteConverter.hasCompleteSubstrateDocument(webVal), "上传的 _Note 必须是完整的 Substrate document")
     }
 }

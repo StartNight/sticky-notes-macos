@@ -248,7 +248,8 @@ final class SyncEngine {
     private func pullNotes(token: String, modelContext: ModelContext, scope: Scope, retryAuthOnFailure: Bool = true) async throws {
         let lidId = NoteConverter.pidLidNoteColorPropertyId
         let webId = NoteConverter.webNoteJSONPropertyId
-        let expandClause = "singleValueExtendedProperties($filter=id eq '\(lidId)' or id eq '\(webId)')"
+        let iconId = NoteConverter.pidTagIconIndexPropertyId
+        let expandClause = "singleValueExtendedProperties($filter=id eq '\(lidId)' or id eq '\(webId)' or id eq '\(iconId)')"
         let encodedExpand = expandClause.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? expandClause
         let urlString = "\(graphEndpoint)/me/mailFolders/notes/messages?$top=100&$orderby=lastModifiedDateTime%20desc&$select=id,changeKey,subject,body,createdDateTime,lastModifiedDateTime&$expand=\(encodedExpand)"
         guard let firstURL = URL(string: urlString) else { return }
@@ -359,6 +360,9 @@ final class SyncEngine {
                     // Still cache `_Note` JSON so a later color-only upload can merge into it.
                     if let webNoteJSON {
                         localNote.webNoteJSON = webNoteJSON
+                    }
+                    if localNote.syncStatus == .synced && !colorLedger.isDirty(localNote.id) && localNote.noteColor != noteColor {
+                        localNote.noteColor = noteColor
                     }
                     continue
                 }
@@ -473,7 +477,32 @@ final class SyncEngine {
 
     // MARK: - Push Pending Local Notes
 
+    private func healIncompleteSubstrateNotes(in modelContext: ModelContext, scope: Scope) {
+        let descriptor = FetchDescriptor<StickyNote>()
+        guard let notes = try? modelContext.fetch(descriptor) else { return }
+        var hasChanges = false
+        for note in notes where note.ownerAccountID == scope.accountID {
+            if note.isDeletedLocally || note.isDeleted || note.recoveryPaused || note.recoveryPendingDeleteID != nil || note.hasCorruptSyncJournal { continue }
+            if note.remoteId != nil && NoteConverter.isLegacyMacAuthoredIncompleteNoteJSON(note.webNoteJSON) {
+                note.webNoteJSON = NoteConverter.webNoteJSON(
+                    setting: note.noteColor,
+                    existing: note.webNoteJSON,
+                    plainText: note.plainTextContent,
+                    localID: note.id,
+                    modifiedAt: note.modifiedAt
+                )
+                colorLedger.markDirty(note.id)
+                note.syncStatus = .pendingUpload
+                hasChanges = true
+            }
+        }
+        if hasChanges {
+            try? modelContext.save()
+        }
+    }
+
     private func pushPendingNotes(token: String, modelContext: ModelContext, scope: Scope) async throws {
+        healIncompleteSubstrateNotes(in: modelContext, scope: scope)
         let deleteFailures = try await pushPendingDeletes(token: token, modelContext: modelContext, scope: scope)
 
         let pendingStatus = SyncStatus.pendingUpload.rawValue
@@ -562,7 +591,14 @@ final class SyncEngine {
                 "content": html
             ]
         ]
-        let colorProps = Self.colorProperties(for: plan, color: note.noteColor, cachedWebJSON: note.webNoteJSON)
+        let colorProps = Self.colorProperties(
+            for: plan,
+            color: note.noteColor,
+            cachedWebJSON: note.webNoteJSON,
+            plainText: note.plainTextContent,
+            localID: note.id,
+            modifiedAt: note.modifiedAt
+        )
         if !colorProps.isEmpty { payload["singleValueExtendedProperties"] = colorProps }
         ColorDiagnostics.guardDecision(path: note.remoteId == nil ? "create" : "patch", remoteID: note.remoteId,
                                        dirty: colorLedger.isDirty(note.id), policy: plan.policy.rawValue)
@@ -796,7 +832,13 @@ final class SyncEngine {
         // 从云端原样搬来的颜色，继续保留云端自己的 `_Note`。
         switch plan.policy {
         case .writeLocal:
-            note.webNoteJSON = NoteConverter.webNoteJSON(setting: snapshot.color, existing: note.webNoteJSON)
+            note.webNoteJSON = NoteConverter.webNoteJSON(
+                setting: snapshot.color,
+                existing: note.webNoteJSON,
+                plainText: snapshot.text,
+                localID: note.id,
+                modifiedAt: snapshot.modified
+            )
             // 若上传过程中用户又改了颜色，则保持 dirty。
             if snapshot.color == note.noteColor { colorLedger.clearDirty(note.id) }
         case .carryServer:
@@ -841,13 +883,29 @@ final class SyncEngine {
         if note.remoteId == nil {
             return ColorPlan(policy: colorLedger.isCarry(note.id) ? .carryCached : .writeLocal)
         }
+        if NoteConverter.isLegacyMacAuthoredIncompleteNoteJSON(note.webNoteJSON) {
+            return ColorPlan(policy: .writeLocal)
+        }
         return ColorPlan(policy: .omit)
     }
 
-    fileprivate static func colorProperties(for plan: ColorPlan, color: NoteColor, cachedWebJSON: String?) -> [[String: Any]] {
+    fileprivate static func colorProperties(
+        for plan: ColorPlan,
+        color: NoteColor,
+        cachedWebJSON: String?,
+        plainText: String? = nil,
+        localID: UUID? = nil,
+        modifiedAt: Date = Date()
+    ) -> [[String: Any]] {
         switch plan.policy {
         case .writeLocal:
-            return NoteConverter.graphColorExtendedProperties(for: color, existingWebNoteJSON: cachedWebJSON)
+            return NoteConverter.graphColorExtendedProperties(
+                for: color,
+                existingWebNoteJSON: cachedWebJSON,
+                plainText: plainText,
+                localID: localID,
+                modifiedAt: modifiedAt
+            )
         case .omit, .carryServer:
             return []
         case .carryCached:
@@ -862,7 +920,9 @@ final class SyncEngine {
         var props = obj["singleValueExtendedProperties"] as? [[String: Any]] ?? []
         props.removeAll { prop in
             guard let id = prop["id"] as? String else { return false }
-            return NoteConverter.isPidLidNoteColorProperty(id) || NoteConverter.isWebNoteJSONProperty(id)
+            return NoteConverter.isPidLidNoteColorProperty(id) ||
+                   NoteConverter.isWebNoteJSONProperty(id) ||
+                   NoteConverter.isPidTagIconIndexProperty(id)
         }
         props.append(contentsOf: properties)
         if props.isEmpty { obj.removeValue(forKey: "singleValueExtendedProperties") } else { obj["singleValueExtendedProperties"] = props }
@@ -873,7 +933,8 @@ final class SyncEngine {
     fileprivate func fetchServerColorProperties(remoteId: String, token: String, scope: Scope) async -> (properties: [[String: Any]], webJSON: String?)? {
         let lidId = NoteConverter.pidLidNoteColorPropertyId
         let webId = NoteConverter.webNoteJSONPropertyId
-        let clause = "singleValueExtendedProperties($filter=id eq '\(lidId)' or id eq '\(webId)')"
+        let iconId = NoteConverter.pidTagIconIndexPropertyId
+        let clause = "singleValueExtendedProperties($filter=id eq '\(lidId)' or id eq '\(webId)' or id eq '\(iconId)')"
         guard let base = graphItemURL(collection: "me/messages", id: remoteId),
               var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return nil }
         components.queryItems = [URLQueryItem(name: "$select", value: "id"), URLQueryItem(name: "$expand", value: clause)]
@@ -890,6 +951,7 @@ final class SyncEngine {
             guard let id = prop["id"] as? String, let value = prop["value"] as? String else { continue }
             if NoteConverter.isWebNoteJSONProperty(id) { out.append(["id": webId, "value": value]); web = value }
             else if NoteConverter.isPidLidNoteColorProperty(id) { out.append(["id": lidId, "value": value]) }
+            else if NoteConverter.isPidTagIconIndexProperty(id) { out.append(["id": iconId, "value": value]) }
         }
         return (out, web)
     }
@@ -1008,6 +1070,9 @@ final class SyncEngine {
         if note.pendingCreateOperationID != nil || note.recoveryPendingDeleteID != nil ||
             !note.recoveryRetainedRemoteIDs.isEmpty || note.hasCorruptSyncJournal || note.hasCorruptRecoveryJournal { return true }
         if note.recoveryPaused { return note.syncStatus == .error } // automatic conflict pause remains unresolved
+        if !note.isDeletedLocally && note.pendingCleanupRemoteIDs.isEmpty && isUntouchedBlankNewNote(note) {
+            return false
+        }
         return note.isDeletedLocally || note.syncStatus != .synced || !note.pendingCleanupRemoteIDs.isEmpty
     }
     private func problemCount(modelContext: ModelContext, scope: Scope) -> Int {
