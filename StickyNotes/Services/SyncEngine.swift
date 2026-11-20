@@ -937,7 +937,8 @@ final class SyncEngine {
         let clause = "singleValueExtendedProperties($filter=id eq '\(lidId)' or id eq '\(webId)' or id eq '\(iconId)')"
         guard let base = graphItemURL(collection: "me/messages", id: remoteId),
               var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else { return nil }
-        components.queryItems = [URLQueryItem(name: "$select", value: "id"), URLQueryItem(name: "$expand", value: clause)]
+        // Include `body` in $select so Exchange reads the full item rather than truncating `_Note` at 255 chars.
+        components.queryItems = [URLQueryItem(name: "$select", value: "id,body"), URLQueryItem(name: "$expand", value: clause)]
         guard let url = components.url else { return nil }
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

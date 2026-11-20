@@ -363,17 +363,12 @@ struct NoteConverter {
         let normalized = plainText.replacingOccurrences(of: "\r\n", with: "\n")
         let lines = normalized.components(separatedBy: "\n")
         let blocks: [[String: Any]] = (lines.isEmpty ? [""] : lines).map { line in
-            var block: [String: Any] = [
+            [
                 "type": "paragraph",
                 "id": UUID().uuidString.lowercased(),
-                "blockStyles": [["textDirection": "ltr"]]
+                "blockStyles": ["textDirection": "ltr"],
+                "content": [["text": line, "styles": [String]()]]
             ]
-            if line.isEmpty {
-                block["content"] = NSNull()
-            } else {
-                block["content"] = [["text": line, "styles": NSNull()]]
-            }
-            return block
         }
         return [
             "type": "document",
