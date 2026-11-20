@@ -18,7 +18,7 @@
 - **听写与录音**：系统语音识别听写，麦克风录音附件。
 - **自动识别链接**：正文中的 URL 可点击。
 - **微软账号登录**：OAuth 登录 Outlook / Microsoft 365，令牌存在登录钥匙串；取消登录会恢复登录前的会话，不会误当成已退出。
-- **云端同步**：通过 Microsoft Graph 读写 Notes 文件夹中的 `IPM.StickyNote`；颜色同时理解网页 `_Note` JSON 与经典属性 0x8B00。
+- **云端同步**：通过 Microsoft Graph 读写 Notes 文件夹中的 `IPM.StickyNote`；正文、标题与增删可与 Outlook 网页版双向同步。颜色通过 `_Note` JSON 与 `0x8B00` / `0x1080` 在本应用之间同步，但微软公开 Graph 接口目前未开放背景色字段且不与 Outlook 网页版 `NotesFabric` 互通颜色（详见 `docs/COLOR_SYNC_LIMITATION.md`）。
 - **账号隔离**：作用域以 Graph `/me.id` 为准。未验证身份前不显示、不同步、不认领、不复制。升级前留下的无主便笺在「设置 → 本地数据」里显式认领或复制，不会自动挂到新账号上。
 - **网页原色保护**：只有用户在本地选过颜色时，上传才会写 `_Note` / 0x8B00；仅改文字的待上传或失败重试不会覆盖网页原色。
 - **浅色 / 深色模式**：每色有对应的正文和工具条颜色。
@@ -181,6 +181,7 @@ scripts/sign-local.sh "/path/to/Sticky Notes.app"
 | 文件 | 职责 |
 |---|---|
 | `docs/ACCOUNT_SYNC_SAFETY.md` | 账号切换与同步的安全约定：本地数据不得悄带到另一账号、不得扩大危险自动恢复，以及相关产品边界说明。 |
+| `docs/COLOR_SYNC_LIMITATION.md` | 微软公开 Graph API 与 Outlook 网页版（`NotesFabric`）之间便笺背景颜色无法双向同步的排查记录、接口核查结论与颜色枚举对照。 |
 
 ## 其他仓库文件
 
