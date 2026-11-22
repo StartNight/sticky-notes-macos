@@ -255,4 +255,33 @@ final class KeychainHelperTests: XCTestCase {
         backend.gate!.signal()
         _ = await probe.value
     }
+
+    // MARK: Phase 2 Regression Tests (C-04, C-05)
+
+    func testFailedReplaceSessionFromDeniedStateDoesNotCorruptStateFlags() {
+        let backend = FakeKeychainBackend()
+        backend.seed(["ms_access_token": "old"])
+        let store = KeychainHelper(backend: backend)
+        store.declineInteractiveRead()
+        XCTAssertEqual(store.loadState, .denied(errSecUserCanceled))
+
+        backend.writeStatus = errSecAuthFailed
+        XCTAssertFalse(store.replaceSession(strings: ["ms_access_token": "new"]))
+        XCTAssertEqual(store.loadState, .denied(errSecUserCanceled), "replaceSession 写入失败不得破坏原 loadState")
+        XCTAssertNil(store.readString(key: "ms_access_token"))
+    }
+
+    func testEpochGuardedClearAllDoesNotDeleteNewerSession() {
+        let backend = FakeKeychainBackend()
+        backend.seed(["ms_access_token": "old"])
+        let store = KeychainHelper(backend: backend)
+        let oldEpoch = store.discardCache()
+        // New session bumps epoch via replaceSession after a newer discard or sign-in:
+        let newEpoch = store.discardCache()
+        XCTAssertNotEqual(oldEpoch, newEpoch)
+        XCTAssertTrue(store.replaceSession(strings: ["ms_access_token": "fresh"], requiredEpoch: newEpoch))
+        XCTAssertTrue(store.clearAll(requiredEpoch: oldEpoch))
+        XCTAssertTrue(backend.hasItem(KeychainHelper.sessionAccount), "过期 epoch 的 clearAll 不得删除新会话")
+        XCTAssertEqual(store.readString(key: "ms_access_token"), "fresh")
+    }
 }

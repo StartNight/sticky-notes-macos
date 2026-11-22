@@ -87,7 +87,7 @@ struct SettingsView: View {
 
                         Button(String(localized: "Sign Out")) {
                             authManager.signOut()
-                            syncEngine.state = .offline
+                            syncEngine.resetForSignOut()
                         }
                     }
                     .padding(.vertical, 4)

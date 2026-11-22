@@ -59,25 +59,72 @@ struct StickyNotesApp: App {
 
     static let sharedContainer: ModelContainer = {
         let schema = Schema([StickyNote.self])
-        // Use the sandboxed container path so we keep existing notes data
-        let containerStore = FileManager.default.homeDirectoryForCurrentUser
+        let fileManager = FileManager.default
+        // Prefer the legacy sandboxed container store if it exists so upgrading users keep their notes.
+        let containerStore = fileManager.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Containers/com.shenanigans.sticky-notes/Data/Library/Application Support/default.store")
-        let storeURL: URL
-        if FileManager.default.fileExists(atPath: containerStore.path) {
-            storeURL = containerStore
-        } else {
-            storeURL = URL.applicationSupportDirectory.appendingPathComponent("default.store")
+        let legacyRootStore = URL.applicationSupportDirectory.appendingPathComponent("default.store")
+        let appSupportDir = URL.applicationSupportDirectory
+            .appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.shenanigans.sticky-notes", isDirectory: true)
+        let scopedStore = appSupportDir.appendingPathComponent("default.store")
+
+        // Distinguish missing container store (ENOENT) from TCC denial (EPERM/EACCES) so we never
+        // silently open a second split-brain store when macOS blocks container access.
+        var statBuf = stat()
+        let statResult = lstat(containerStore.path, &statBuf)
+        let containerErrno = statResult == 0 ? 0 : errno
+        if containerErrno == EPERM || containerErrno == EACCES {
+            NSLog("STORE_OPEN_BLOCKED reason=tcc_container_denied errno=%d", containerErrno)
+            presentFatalStoreError(
+                message: "无法访问历史便笺容器目录（系统权限受限，错误码 \(containerErrno)）。为避免数据分裂，应用已停止启动；请在「系统设置 → 隐私与安全性」授予访问权限后重试。"
+            )
         }
+
+        let storeURL: URL
+        if statResult == 0 {
+            storeURL = containerStore
+        } else if fileManager.fileExists(atPath: scopedStore.path) {
+            storeURL = scopedStore
+        } else if fileManager.fileExists(atPath: legacyRootStore.path) {
+            // Preserve existing unsandboxed store at root Application Support if already created earlier.
+            storeURL = legacyRootStore
+        } else {
+            try? fileManager.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
+            storeURL = scopedStore
+        }
+
         // Copy-only safety net before this build first opens the store; never overwrites/moves/deletes.
-        _ = try? StoreSafetyBackup.createIfNeeded(storeURL: storeURL)
+        do {
+            _ = try StoreSafetyBackup.createIfNeeded(storeURL: storeURL)
+        } catch {
+            let nsErr = error as NSError
+            NSLog("STORE_SAFETY_BACKUP_FAILED domain=%@ code=%ld", nsErr.domain, nsErr.code)
+        }
+
         let config = ModelConfiguration(schema: schema, url: storeURL)
         do {
             return try ModelContainer(for: schema, configurations: [config])
         } catch {
             // Never delete or recreate the user's store after a migration/open failure.
-            fatalError("无法打开便笺数据库。原数据已保留，请备份并联系支持后重试。")
+            let nsErr = error as NSError
+            NSLog("STORE_OPEN_FAILED domain=%@ code=%ld", nsErr.domain, nsErr.code)
+            presentFatalStoreError(
+                message: "无法打开便笺数据库（\(nsErr.domain) #\(nsErr.code)）。原数据已保留，请先备份数据库文件后再重试。"
+            )
         }
     }()
+
+    private static func presentFatalStoreError(message: String) -> Never {
+        if Thread.isMainThread {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = String(localized: "Sticky Notes")
+            alert.informativeText = message
+            alert.addButton(withTitle: String(localized: "Done"))
+            alert.runModal()
+        }
+        fatalError(message)
+    }
 
     var body: some Scene {
         WindowGroup(String(localized: "Notes List")) {

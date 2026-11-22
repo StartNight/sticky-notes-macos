@@ -2,6 +2,7 @@ import Foundation
 import AuthenticationServices
 import CryptoKit
 import SwiftUI
+import os
 
 @MainActor
 protocol SyncAuthProviding: AnyObject {
@@ -124,6 +125,9 @@ final class AuthManager: NSObject, SyncAuthProviding {
         let userEmail: String?
         let accountID: String?
         let identityVerified: Bool
+        let identityMismatch: Bool
+        let lastAuthError: String?
+        let restoreState: RestoreState
     }
 
     // Keychain Keys
@@ -186,10 +190,13 @@ final class AuthManager: NSObject, SyncAuthProviding {
     private func startIdentityVerification() {
         guard verifyIdentityAfterRestore, isAuthenticated, let cached = accountID, !cached.isEmpty,
               !identityVerified, !identityMismatch, identityVerificationTask == nil else { return }
+        let generation = sessionGeneration
         identityVerificationTask = Task { [weak self] in
             guard let self else { return }
             _ = try? await self.ensureAccountID()
-            self.identityVerificationTask = nil
+            if self.sessionGeneration == generation {
+                self.identityVerificationTask = nil
+            }
         }
     }
     func waitForKeychainWork() async { await keychainWork?.value }
@@ -251,14 +258,26 @@ final class AuthManager: NSObject, SyncAuthProviding {
     func signIn() async throws {
         NSLog("AUTH_FLOW phase=login")
         guard !isAuthenticating else { throw CancellationError() }
-        let previous = SessionSnapshot(isAuthenticated: isAuthenticated, userName: userName, userEmail: userEmail,
-                                       accountID: accountID, identityVerified: identityVerified)
+        let previous = SessionSnapshot(
+            isAuthenticated: isAuthenticated,
+            userName: userName,
+            userEmail: userEmail,
+            accountID: accountID,
+            identityVerified: identityVerified,
+            identityMismatch: identityMismatch,
+            lastAuthError: lastAuthError,
+            restoreState: restoreState
+        )
         sessionGeneration = UUID()
         let generation = sessionGeneration
+        restoreTask?.cancel()
+        restoreTask = nil
         refreshTask?.cancel()
         refreshTask = nil
         identityTask?.cancel()
         identityTask = nil
+        identityVerificationTask?.cancel()
+        identityVerificationTask = nil
         accountID = nil
         identityVerified = false
         identityMismatch = false
@@ -281,27 +300,45 @@ final class AuthManager: NSObject, SyncAuthProviding {
         if let runner = authSessionRunner {
             callbackURL = try await runner(authURL, callbackScheme)
         } else {
-            callbackURL = try await withCheckedThrowingContinuation { continuation in
-            let session = ASWebAuthenticationSession(
-                url: authURL,
-                callbackURLScheme: callbackScheme
-            ) { callbackURL, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let callbackURL {
-                    continuation.resume(returning: callbackURL)
-                } else {
-                    continuation.resume(throwing: NSError(domain: "AuthManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Unknown authentication error"]))
-                }
-            }
+            callbackURL = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    let resumed = OSAllocatedUnfairLock(initialState: false)
+                    let resumeOnce: @Sendable (Result<URL, Error>) -> Void = { result in
+                        let shouldResume = resumed.withLock { done -> Bool in
+                            guard !done else { return false }
+                            done = true
+                            return true
+                        }
+                        if shouldResume {
+                            continuation.resume(with: result)
+                        }
+                    }
 
-            session.presentationContextProvider = self
-            session.prefersEphemeralWebBrowserSession = Self.usesEphemeralSession
-            self.currentAuthSession = session
-            if !session.start() {
-                continuation.resume(throwing: NSError(domain: "AuthManager", code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: "无法启动微软登录窗口"]))
-            }
+                    let session = ASWebAuthenticationSession(
+                        url: authURL,
+                        callbackURLScheme: callbackScheme
+                    ) { callbackURL, error in
+                        if let error {
+                            resumeOnce(.failure(error))
+                        } else if let callbackURL {
+                            resumeOnce(.success(callbackURL))
+                        } else {
+                            resumeOnce(.failure(NSError(domain: "AuthManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Unknown authentication error"])))
+                        }
+                    }
+
+                    session.presentationContextProvider = self
+                    session.prefersEphemeralWebBrowserSession = Self.usesEphemeralSession
+                    self.currentAuthSession = session
+                    if !session.start() {
+                        resumeOnce(.failure(NSError(domain: "AuthManager", code: -2,
+                            userInfo: [NSLocalizedDescriptionKey: "无法启动微软登录窗口"])))
+                    }
+                }
+            } onCancel: {
+                Task { @MainActor [weak self] in
+                    self?.currentAuthSession?.cancel()
+                }
             }
         }
 
@@ -322,13 +359,16 @@ final class AuthManager: NSObject, SyncAuthProviding {
             throw NSError(domain: "AuthManager", code: -5, userInfo: [NSLocalizedDescriptionKey: "State mismatch (CSRF warning)"])
         }
 
-        guard let authCode = urlComponents.queryItems?.first(where: { $0.name == "code" })?.value else {
+        guard let authCode = urlComponents.queryItems?.first(where: { $0.name == "code" })?.value, !authCode.isEmpty else {
             throw NSError(domain: "AuthManager", code: -6, userInfo: [NSLocalizedDescriptionKey: "No authorization code returned"])
         }
 
         // 5. Exchange code for access & refresh tokens and verify identity before writing to keychain once
         try await exchangeAuthCode(authCode, codeVerifier: codeVerifier)
         try requireGeneration(generation)
+        restoreTask?.cancel()
+        restoreTask = nil
+        restoreState = .done
         defaults.set(false, forKey: "ms_explicitly_signed_out")
         } catch {
             restorePreviousSession(previous, afterFailureIn: generation, error: error)
@@ -340,14 +380,32 @@ final class AuthManager: NSObject, SyncAuthProviding {
     /// never touched, so this is also what the next launch will restore). Never restores over a sign-out or a newer
     /// sign-in that happened meanwhile, and never after the new session replaced the old one.
     private func restorePreviousSession(_ previous: SessionSnapshot, afterFailureIn generation: UUID, error: Error) {
-        guard sessionGeneration == generation, !isAuthenticated, previous.isAuthenticated else { return }
+        guard sessionGeneration == generation, !isAuthenticated else { return }
+        if !previous.isAuthenticated {
+            if previous.restoreState == .loading {
+                if keychain.isHydrated {
+                    applyStoredAuth()
+                    restoreState = .done
+                } else {
+                    beginRestore()
+                }
+            } else {
+                restoreState = previous.restoreState
+            }
+            return
+        }
         isAuthenticated = true
         userName = previous.userName
         userEmail = previous.userEmail
         accountID = previous.accountID
         identityVerified = previous.identityVerified
+        identityMismatch = previous.identityMismatch
+        lastAuthError = previous.lastAuthError
+        restoreState = previous.restoreState == .loading ? .done : previous.restoreState
         NSLog("AUTH_FLOW phase=login-cancelled-restored")
-        NotificationCenter.default.post(name: .requestModelContextSync, object: nil)
+        if !previous.identityMismatch {
+            NotificationCenter.default.post(name: .requestModelContextSync, object: nil)
+        }
     }
 
     // MARK: - Token Exchange
@@ -419,8 +477,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
     // MARK: - Token Refresh & Acquisition
 
     func getValidAccessToken() async throws -> String {
-        guard let token = keychain.readString(key: kAccessToken) else {
-            self.isAuthenticated = false
+        guard isAuthenticated, let token = keychain.readString(key: kAccessToken), !token.isEmpty else {
+            if isAuthenticated { invalidateSession() }
             throw NSError(domain: "AuthManager", code: 401, userInfo: [NSLocalizedDescriptionKey: "Not authenticated"])
         }
 
@@ -429,7 +487,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
            let expiryTimestamp = Double(expiryStr) {
             let expiryDate = Date(timeIntervalSince1970: expiryTimestamp)
             // Refresh if within 5 minutes of expiration
-            isExpired = Date().addingTimeInterval(300) >= expiryDate
+            isExpired = now().addingTimeInterval(300) >= expiryDate
         } else {
             isExpired = false
         }
@@ -442,6 +500,9 @@ final class AuthManager: NSObject, SyncAuthProviding {
     }
 
     func refreshTokens() async throws -> String {
+        guard isAuthenticated else {
+            throw NSError(domain: "AuthManager", code: 401, userInfo: [NSLocalizedDescriptionKey: "Not authenticated"])
+        }
         let generation = sessionGeneration
         if let refreshTask {
             let token = try await refreshTask.value
@@ -498,8 +559,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
         NSLog("AUTH_FLOW phase=refresh")
         try Task.checkCancellation()
         try requireGeneration(generation)
-        guard let refreshToken = keychain.readString(key: kRefreshToken) else {
-            self.isAuthenticated = false
+        guard isAuthenticated, let refreshToken = keychain.readString(key: kRefreshToken), !refreshToken.isEmpty else {
+            if isAuthenticated { invalidateSession() }
             throw NSError(domain: "AuthManager", code: 401, userInfo: [NSLocalizedDescriptionKey: "No refresh token available. Please sign in again."])
         }
 
@@ -556,6 +617,9 @@ final class AuthManager: NSObject, SyncAuthProviding {
     // MARK: - User Profile
 
     func ensureAccountID() async throws -> String {
+        guard isAuthenticated else {
+            throw NSError(domain: "AuthManager", code: 401, userInfo: [NSLocalizedDescriptionKey: "Not authenticated"])
+        }
         if identityMismatch { throw Self.identityMismatchError }
         if let accountID, !accountID.isEmpty, identityVerified { return accountID }
         let generation = sessionGeneration
@@ -600,7 +664,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
         }
         let name = json["displayName"] as? String ?? ""
         let email = (json["mail"] as? String) ?? (json["userPrincipalName"] as? String) ?? ""
-        if let cached = accountID, !cached.isEmpty, cached != id {
+        let persistedID = keychain.readString(key: kAccountID).flatMap { $0.isEmpty ? nil : $0 }
+        if let cached = accountID ?? persistedID, !cached.isEmpty, cached != id {
             // The keychain/session claims account A but the token belongs to B. Do not adopt B silently and do not
             // touch the keychain: treat the identity as unconfirmed (blocked scope, nothing shown or synced).
             identityMismatch = true
@@ -630,7 +695,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
 
     // MARK: - Sign Out
 
-    private func invalidateSession() {
+    @discardableResult
+    private func invalidateSession() -> Int {
         // Invalidate every outstanding OAuth/refresh/sync continuation before storage changes.
         sessionGeneration = UUID()
         defaults.set(true, forKey: "ms_explicitly_signed_out")
@@ -640,6 +706,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
         refreshTask = nil
         identityTask?.cancel()
         identityTask = nil
+        identityVerificationTask?.cancel()
+        identityVerificationTask = nil
         isAuthenticating = false
         isAuthenticated = false
         accountID = nil
@@ -648,21 +716,26 @@ final class AuthManager: NSObject, SyncAuthProviding {
         resetRefreshThrottle()
         userEmail = nil
         userName = nil
+        // Memory only (no SecItem call): clear revoked/signed-out tokens from RAM immediately.
+        return keychain.discardCache()
     }
 
     func signOut() {
         NSLog("AUTH_FLOW phase=logout")
-        invalidateSession()
-        // Memory first (instant, no SecItem): the session is gone and queued refresh writes are voided.
-        keychain.discardCache()
+        let clearEpoch = invalidateSession()
+        let generation = sessionGeneration
         restoreTask?.cancel()
+        restoreTask = nil
         restoreState = .done
         lastAuthError = nil
-        // Then remove ONLY the current session item, in the background. Other items are not touched.
+        // Remove ONLY the current session item in the background, guarded by `clearEpoch` so a
+        // subsequent sign-in's new session can never be deleted by a late sign-out task.
         keychainWork = Task { [weak self] in
             guard let self else { return }
-            let ok = await self.keychain.clearAllAsync()
-            if !ok { self.lastAuthError = "本地已退出，但钥匙串清理未完成；重开不会自动恢复登录。" }
+            let ok = await self.keychain.clearAllAsync(requiredEpoch: clearEpoch)
+            if !ok, self.sessionGeneration == generation {
+                self.lastAuthError = "本地已退出，但钥匙串清理未完成；重开不会自动恢复登录。"
+            }
         }
     }
 

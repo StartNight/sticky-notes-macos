@@ -130,6 +130,12 @@ struct NoteWindowView: View {
         .onChange(of: note?.modifiedAt) { _, _ in
             syncFromModelIfExternalChange()
         }
+        .onChange(of: note?.changeKey) { _, _ in
+            syncFromModelIfExternalChange()
+        }
+        .onChange(of: note?.lastSyncedAt) { _, _ in
+            syncFromModelIfExternalChange()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .formatBold)) { _ in
             if editorProxy.textView?.window?.isKeyWindow == true {
                 editorProxy.toggleBold()
@@ -327,24 +333,15 @@ struct NoteWindowView: View {
     }
 
     private func deleteNote() {
-        guard let noteToDelete = note else { return }
-        do { try SyncEngine.shared.prepareForDeletion(noteToDelete, modelContext: modelContext) }
-        catch { SyncEngine.shared.state = .error(error.localizedDescription); return }
-        let remoteId = noteToDelete.remoteId
+        guard let noteToDelete = note, !noteToDelete.isDeleted, !noteToDelete.isDeletedLocally else { return }
         audioRecorder.stopPlayback()
         speechRecognizer.stopListening()
         self.note = nil
         windowManager.closeWindow(for: noteID)
-        if noteToDelete.requiresRemoteCleanup {
-            noteToDelete.isDeletedLocally = true
-            noteToDelete.syncStatus = .error
-            try? modelContext.save()
-            if let remoteId {
-                SyncEngine.shared.deleteRemoteNote(remoteId: remoteId, ownerAccountID: noteToDelete.ownerAccountID)
-            }
-        } else {
-            modelContext.delete(noteToDelete)
-            try? modelContext.save()
+        do {
+            try SyncEngine.shared.requestDeletion(of: noteToDelete, in: modelContext)
+        } catch {
+            SyncEngine.shared.state = .error(error.localizedDescription)
         }
     }
 }

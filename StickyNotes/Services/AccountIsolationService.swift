@@ -251,19 +251,47 @@ enum LocalExporter {
 enum StoreSafetyBackup {
     static let suffix = ".pre-account-isolation"
 
-    /// Copies the store (+ -wal/-shm) once, next to the original. Never overwrites, moves or deletes anything.
+    /// Copies the store (+ SQLite `-wal`/`-shm` with valid SQLite sibling names + external storage)
+    /// once, next to the original. Copies auxiliary files first and rolls back partial copies on error
+    /// so a failed backup never locks out retries. Never overwrites, moves, or deletes the live store.
     @discardableResult
     static func createIfNeeded(storeURL: URL, fileManager: FileManager = .default) throws -> [URL] {
         guard fileManager.fileExists(atPath: storeURL.path) else { return [] }
         let mainBackup = URL(fileURLWithPath: storeURL.path + suffix)
         guard !fileManager.fileExists(atPath: mainBackup.path) else { return [] }
-        var created: [URL] = []
-        for extra in ["", "-wal", "-shm"] {
+
+        // Build (source, target) pairs with valid SQLite WAL/SHM sibling names:
+        //   default.store.pre-account-isolation-wal / -shm
+        // Copy auxiliary files BEFORE the main backup sentinel so partial failure cleans up cleanly.
+        var pairs: [(source: URL, target: URL)] = []
+        for extra in ["-wal", "-shm"] {
             let source = URL(fileURLWithPath: storeURL.path + extra)
-            let target = URL(fileURLWithPath: storeURL.path + extra + suffix)
-            guard fileManager.fileExists(atPath: source.path), !fileManager.fileExists(atPath: target.path) else { continue }
-            try fileManager.copyItem(at: source, to: target)
-            created.append(target)
+            let target = URL(fileURLWithPath: storeURL.path + suffix + extra)
+            if fileManager.fileExists(atPath: source.path), !fileManager.fileExists(atPath: target.path) {
+                pairs.append((source, target))
+            }
+        }
+        // CoreData/SwiftData external storage directory (e.g. `.default_SUPPORT` for `default.store`)
+        let baseName = storeURL.deletingPathExtension().lastPathComponent
+        let externalSupport = storeURL.deletingLastPathComponent().appendingPathComponent(".\(baseName)_SUPPORT")
+        let externalBackup = storeURL.deletingLastPathComponent().appendingPathComponent(".\(baseName)_SUPPORT\(suffix)")
+        if fileManager.fileExists(atPath: externalSupport.path), !fileManager.fileExists(atPath: externalBackup.path) {
+            pairs.append((externalSupport, externalBackup))
+        }
+        pairs.append((storeURL, mainBackup))
+
+        var created: [URL] = []
+        do {
+            for pair in pairs {
+                try fileManager.copyItem(at: pair.source, to: pair.target)
+                created.append(pair.target)
+            }
+        } catch {
+            // Roll back partial backup files so the next launch can retry cleanly.
+            for url in created.reversed() {
+                try? fileManager.removeItem(at: url)
+            }
+            throw error
         }
         return created
     }

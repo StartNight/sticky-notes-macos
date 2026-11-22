@@ -629,4 +629,82 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertNil(store.readString(key: "ms_graph_account_id"))
         XCTAssertFalse(auth.isAuthenticated)
     }
+
+    // MARK: Phase 2 Regression Tests (C-03, C-04, H-04)
+
+    func testCancelledSignInCannotBypassIdentityMismatchGuard() async throws {
+        let backend = FakeKeychainBackend()
+        backend.seed([
+            "ms_access_token": "tok-B",
+            "ms_refresh_token": "ref-B",
+            "ms_token_expiry": String(Date().addingTimeInterval(3600).timeIntervalSince1970),
+            "ms_graph_account_id": "acct-A"
+        ])
+        let store = KeychainHelper(backend: backend)
+        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        await auth.waitForRestore()
+
+        // /me returns B while keychain claims A -> mismatch detected, accountID cleared.
+        MockURLProtocol.handler = { _ in
+            .http(status: 200, json: ["id": "acct-B", "displayName": "User B", "mail": "b@example.com"])
+        }
+        do { _ = try await auth.ensureAccountID(); XCTFail("Expected mismatch") } catch {}
+        XCTAssertTrue(auth.identityMismatch)
+        XCTAssertNil(auth.accountID)
+
+        // User starts signIn and cancels -> must NOT lose identityMismatch or allow B adoption!
+        auth.authSessionRunner = { _, _ in throw CancellationError() }
+        do { try await auth.signIn(); XCTFail("Expected cancel") } catch {}
+        XCTAssertTrue(auth.identityMismatch, "取消登录后必须保留 identityMismatch 阻断状态")
+        XCTAssertEqual(auth.activeScope, .blocked)
+
+        // Subsequent ensureAccountID must still fail with mismatch and never overwrite kAccountID with acct-B.
+        do { _ = try await auth.ensureAccountID(); XCTFail("Expected mismatch to persist") } catch {}
+        XCTAssertEqual(store.readString(key: "ms_graph_account_id"), "acct-A")
+    }
+
+    func testSignOutThenImmediateSignInDoesNotWipeNewSession() async throws {
+        let backend = FakeKeychainBackend()
+        backend.seed(["ms_access_token": "tok-A", "ms_refresh_token": "ref-A", "ms_graph_account_id": "acct-A"])
+        let store = KeychainHelper(backend: backend)
+        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        await auth.waitForRestore()
+
+        auth.signOut()
+        // Immediately sign in as B while signOut's background clearAllAsync may still be queued.
+        auth.authSessionRunner = { [self] url, _ in callback(from: url) }
+        MockURLProtocol.handler = { req in
+            if req.url?.host == "login.microsoftonline.com" {
+                return .http(status: 200, json: ["access_token": "tok-B", "refresh_token": "ref-B", "expires_in": 3600])
+            }
+            return .http(status: 200, json: ["id": "acct-B", "displayName": "User B", "mail": "b@example.com"])
+        }
+        try await auth.signIn()
+        await auth.waitForKeychainWork()
+        XCTAssertTrue(auth.isAuthenticated)
+        XCTAssertEqual(auth.accountID, "acct-B")
+        XCTAssertEqual(store.readString(key: "ms_access_token"), "tok-B", "延迟的登出清理不得清空刚登录的新会话")
+        XCTAssertTrue(backend.hasItem(KeychainHelper.sessionAccount))
+    }
+
+    func testInvalidateSessionDiscardsMemoryTokensAndRejectsTokenCalls() async throws {
+        let backend = FakeKeychainBackend()
+        backend.seed([
+            "ms_access_token": "tok-revoked",
+            "ms_refresh_token": "ref-revoked",
+            "ms_token_expiry": String(Date().addingTimeInterval(3600).timeIntervalSince1970),
+            "ms_graph_account_id": "acct-A"
+        ])
+        let store = KeychainHelper(backend: backend)
+        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        await auth.waitForRestore()
+
+        MockURLProtocol.handler = { _ in .http(status: 400, json: [:]) }
+        do { _ = try await auth.refreshTokens(); XCTFail("Expected 400 invalidation") } catch {}
+        XCTAssertFalse(auth.isAuthenticated)
+        XCTAssertNil(store.readString(key: "ms_access_token"), "失效会话必须立即清空内存令牌缓存")
+        XCTAssertTrue(backend.deletes.isEmpty, "失效不删除磁盘钥匙串项")
+        do { _ = try await auth.getValidAccessToken(); XCTFail("Expected 401") } catch {}
+        do { _ = try await auth.ensureAccountID(); XCTFail("Expected 401") } catch {}
+    }
 }

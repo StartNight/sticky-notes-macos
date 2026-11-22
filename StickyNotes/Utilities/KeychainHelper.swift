@@ -62,6 +62,11 @@ private struct SystemKeychainBackend: KeychainBackend {
         item[kSecValueData as String] = data
         let addStatus = SecItemAdd(item as CFDictionary, nil)
         NSLog("AUTH_KEYCHAIN sec=add status=%d", addStatus)
+        if addStatus == errSecDuplicateItem {
+            let retryStatus = SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            NSLog("AUTH_KEYCHAIN sec=update-retry status=%d", retryStatus)
+            return retryStatus
+        }
         return addStatus
     }
     func delete(account: String, dataProtection: Bool) -> OSStatus {
@@ -222,8 +227,11 @@ final class KeychainHelper: @unchecked Sendable {
                 return .failed(s)
             }
         }
+        let blob: Data? = legacy.isEmpty ? nil : (try? JSONEncoder().encode(legacy))
+        if let blob, withState({ epoch == startEpoch && writable }) {
+            _ = writeBlobLocked(blob)
+        }
         commit(startEpoch) { cache = legacy; hydrated = true; state = .ready }
-        if !legacy.isEmpty, withState({ epoch == startEpoch }) { _ = persistLocked() }
         return legacy.isEmpty ? .notFound : .success
     }
 
@@ -244,68 +252,100 @@ final class KeychainHelper: @unchecked Sendable {
     func read(key: String) -> Data? { withState { cache[key] } }
     func readString(key: String) -> String? { read(key: key).flatMap { String(data: $0, encoding: .utf8) } }
 
-    // MARK: Writes
+    // MARK: Writes (Prepare -> Write -> Commit under ioLock)
 
     @discardableResult
     func update(strings: [String: String], requiredEpoch: Int? = nil) -> Bool {
         ioLock.lock(); defer { ioLock.unlock() }
-        let (previous, changed): ([String: Data]?, Bool) = withState {
-            guard hydrated, writable, requiredEpoch == nil || requiredEpoch == epoch else { return (nil, false) }
-            let old = cache
+        enum Plan { case abort, noop, write([String: Data], Data, Int) }
+        let plan: Plan = withState {
+            guard hydrated, writable, requiredEpoch == nil || requiredEpoch == epoch else { return .abort }
+            var next = cache
             var didChange = false
             for (key, value) in strings {
                 let data = Data(value.utf8)
-                if cache[key] != data {
-                    cache[key] = data
+                if next[key] != data {
+                    next[key] = data
                     didChange = true
                 }
             }
-            return (old, didChange)
+            if !didChange { return .noop }
+            guard let blob = try? JSONEncoder().encode(next) else { return .abort }
+            return .write(next, blob, epoch)
         }
-        guard let previous else { return false }
-        if !changed { return true }
-        if persistLocked() { return true }
-        withState { cache = previous }
-        return false
+        switch plan {
+        case .abort: return false
+        case .noop: return true
+        case .write(let next, let blob, let startEpoch):
+            guard writeBlobLocked(blob) else { return false }
+            return withState {
+                guard hydrated, writable, epoch == startEpoch, requiredEpoch == nil || requiredEpoch == epoch else {
+                    return false
+                }
+                cache = next
+                return true
+            }
+        }
     }
     /// New interactive login replaces the whole session in one write. It does not read the old item
     /// (nothing to merge, no old-token import) and never uses the startup/silent-refresh path.
     @discardableResult
     func replaceSession(strings: [String: String], requiredEpoch: Int? = nil) -> Bool {
         ioLock.lock(); defer { ioLock.unlock() }
-        let previous: [String: Data]? = withState {
+        let prepared: ([String: Data], Data, Int)? = withState {
             guard requiredEpoch == nil || requiredEpoch == epoch else { return nil }
-            let old = cache
-            cache = strings.mapValues { Data($0.utf8) }
-            hydrated = true; writable = true; state = .ready
-            return old
+            let next = strings.mapValues { Data($0.utf8) }
+            guard let blob = try? JSONEncoder().encode(next) else { return nil }
+            return (next, blob, epoch)
         }
-        guard let previous else { return false }
-        if persistLocked() { return true }
-        withState { cache = previous }
-        return false
+        guard let (next, blob, startEpoch) = prepared else { return false }
+        guard writeBlobLocked(blob) else { return false }
+        return withState {
+            guard epoch == startEpoch, requiredEpoch == nil || requiredEpoch == epoch else { return false }
+            cache = next
+            hydrated = true
+            writable = true
+            state = .ready
+            return true
+        }
     }
     @discardableResult
     func save(key: String, data: Data) -> Bool {
         ioLock.lock(); defer { ioLock.unlock() }
-        let ok = withState { () -> Bool in
-            guard hydrated, writable else { return false }
-            cache[key] = data
+        let prepared: ([String: Data], Data, Int)? = withState {
+            guard hydrated, writable else { return nil }
+            var next = cache
+            next[key] = data
+            guard let blob = try? JSONEncoder().encode(next) else { return nil }
+            return (next, blob, epoch)
+        }
+        guard let (next, blob, startEpoch) = prepared else { return false }
+        guard writeBlobLocked(blob) else { return false }
+        return withState {
+            guard hydrated, writable, epoch == startEpoch else { return false }
+            cache = next
             return true
         }
-        return ok && persistLocked()
     }
     @discardableResult
     func save(key: String, string: String) -> Bool { save(key: key, data: Data(string.utf8)) }
     @discardableResult
     func delete(key: String) -> Bool {
         ioLock.lock(); defer { ioLock.unlock() }
-        let ok = withState { () -> Bool in
-            guard hydrated, writable else { return false }
-            cache.removeValue(forKey: key)
+        let prepared: ([String: Data], Data, Int)? = withState {
+            guard hydrated, writable else { return nil }
+            var next = cache
+            next.removeValue(forKey: key)
+            guard let blob = try? JSONEncoder().encode(next) else { return nil }
+            return (next, blob, epoch)
+        }
+        guard let (next, blob, startEpoch) = prepared else { return false }
+        guard writeBlobLocked(blob) else { return false }
+        return withState {
+            guard hydrated, writable, epoch == startEpoch else { return false }
+            cache = next
             return true
         }
-        return ok && persistLocked()
     }
 
     func updateAsync(strings: [String: String]) async -> Bool {
@@ -320,23 +360,40 @@ final class KeychainHelper: @unchecked Sendable {
     // MARK: Sign-out / cleanup
 
     /// Synchronous, memory only: forget the session and invalidate queued writes. No SecItem call.
-    func discardCache() {
-        withState { cache.removeAll(); hydrated = true; writable = true; state = .ready; epoch += 1 }
+    /// Returns the new epoch so an asynchronous delete can guard against racing a newer sign-in.
+    @discardableResult
+    func discardCache() -> Int {
+        withState {
+            cache.removeAll()
+            hydrated = true
+            writable = true
+            state = .ready
+            epoch += 1
+            return epoch
+        }
     }
 
     /// Sign-out: removes ONLY the current session item (`ms_auth_session`). Legacy per-field items and
     /// anything else in the keychain are left alone (they are cleaned from Settings after a double confirmation).
     @discardableResult
-    func clearAll() -> Bool {
-        discardCache()
+    func clearAll(requiredEpoch: Int? = nil) -> Bool {
+        let targetEpoch: Int
+        if let requiredEpoch {
+            targetEpoch = requiredEpoch
+        } else {
+            targetEpoch = discardCache()
+        }
         ioLock.lock(); defer { ioLock.unlock() }
+        guard withState({ epoch == targetEpoch }) else { return true }
         guard let backend else { return true }
         withState { _deleteCount += 1 }
         let status = backend.delete(account: Self.sessionAccount, dataProtection: false)
         record("sessionDelete", status: status)
         return status == errSecSuccess || status == errSecItemNotFound
     }
-    func clearAllAsync() async -> Bool { await onIOQueue { self.clearAll() } }
+    func clearAllAsync(requiredEpoch: Int? = nil) async -> Bool {
+        await onIOQueue { self.clearAll(requiredEpoch: requiredEpoch) }
+    }
 
     /// Explicit Settings action (after a two-step confirmation): remove old per-field items from earlier versions.
     @discardableResult
@@ -354,10 +411,8 @@ final class KeychainHelper: @unchecked Sendable {
     }
     func clearLegacyItemsAsync() async -> Bool { await onIOQueue { self.clearLegacyItems() } }
 
-    private func persistLocked() -> Bool {
+    private func writeBlobLocked(_ blob: Data) -> Bool {
         guard let backend else { return true }
-        let blob: Data? = withState { writable ? (try? JSONEncoder().encode(cache)) : nil }
-        guard let blob else { return false }
         withState { _writeCount += 1 }
         let status = backend.write(account: Self.sessionAccount, data: blob, dataProtection: false)
         record("write", status: status)

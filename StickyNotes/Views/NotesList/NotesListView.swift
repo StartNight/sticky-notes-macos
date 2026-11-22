@@ -10,7 +10,7 @@ struct NotesListView: View {
     @State private var authManager = AuthManager.shared
     @State private var syncEngine = SyncEngine.shared
     @State private var searchText = ""
-    @State private var noteToDelete: StickyNote?
+    @State private var noteToDeleteID: UUID?
     @State private var showDeleteConfirmation = false
     @State private var showSyncPopover = false
     @State private var isCollapsed = false
@@ -66,10 +66,10 @@ struct NotesListView: View {
             Text(String(localized: "macOS may show the keychain prompt twice. Please choose Always Allow both times. Choosing Deny or Cancel deletes nothing, and the app will not ask again until you restart it."))
         }
         .alert(String(localized: "Delete Note?"), isPresented: $showDeleteConfirmation) {
-            Button(String(localized: "Cancel"), role: .cancel) { noteToDelete = nil }
+            Button(String(localized: "Cancel"), role: .cancel) { noteToDeleteID = nil }
             Button(String(localized: "Delete"), role: .destructive) {
-                if let note = noteToDelete { deleteNote(note) }
-                noteToDelete = nil
+                if let id = noteToDeleteID { deleteNote(id: id) }
+                noteToDeleteID = nil
             }
         } message: {
             Text(String(localized: "This note will be permanently deleted."))
@@ -220,6 +220,7 @@ struct NotesListView: View {
 
                     Button(String(localized: "Sign Out"), role: .destructive) {
                         authManager.signOut()
+                        syncEngine.resetForSignOut()
                     }
                 }
             } else {
@@ -343,28 +344,23 @@ struct NotesListView: View {
 
     private func requestDelete(_ note: StickyNote) {
         if confirmBeforeDelete {
-            noteToDelete = note
+            noteToDeleteID = note.id
             showDeleteConfirmation = true
         } else {
-            deleteNote(note)
+            deleteNote(id: note.id)
         }
     }
 
-    private func deleteNote(_ note: StickyNote) {
-        do { try syncEngine.prepareForDeletion(note, modelContext: modelContext) }
-        catch { syncEngine.state = .error(error.localizedDescription); return }
+    private func deleteNote(id: UUID) {
+        let descriptor = FetchDescriptor<StickyNote>(predicate: #Predicate<StickyNote> { $0.id == id })
+        guard let note = try? modelContext.fetch(descriptor).first,
+              !note.isDeleted, !note.isDeletedLocally,
+              note.isVisible(in: scope) else { return }
         windowManager.closeWindow(for: note.id)
-        let remoteId = note.remoteId
-        if note.requiresRemoteCleanup {
-            note.isDeletedLocally = true
-            note.syncStatus = .error
-            try? modelContext.save()
-            if let remoteId {
-                syncEngine.deleteRemoteNote(remoteId: remoteId, ownerAccountID: note.ownerAccountID)
-            }
-        } else {
-            modelContext.delete(note)
-            try? modelContext.save()
+        do {
+            try syncEngine.requestDeletion(of: note, in: modelContext)
+        } catch {
+            syncEngine.state = .error(error.localizedDescription)
         }
     }
 }

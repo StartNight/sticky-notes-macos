@@ -59,16 +59,38 @@ final class StickyNote {
     var recoveryPendingDeleteKindRaw: String?
     var recoveryAudit: [RecoveryAuditEntry] {
         get { recoveryAuditData.flatMap { try? JSONDecoder().decode([RecoveryAuditEntry].self, from: $0) } ?? [] }
-        set { recoveryAuditData = try? JSONEncoder().encode(newValue) }
+        set {
+            // Never overwrite corrupt recovery journal bytes silently.
+            guard !hasCorruptRecoveryJournal else { return }
+            if newValue.isEmpty {
+                recoveryAuditData = nil
+            } else if let encoded = try? JSONEncoder().encode(newValue) {
+                recoveryAuditData = encoded
+            }
+        }
     }
     var recoveryRetainedRemoteIDs: [String] {
         get { recoveryRetainedIDsData.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? [] }
-        set { recoveryRetainedIDsData = try? JSONEncoder().encode(newValue) }
+        set {
+            guard !hasCorruptRecoveryJournal else { return }
+            if newValue.isEmpty {
+                recoveryRetainedIDsData = nil
+            } else if let encoded = try? JSONEncoder().encode(newValue) {
+                recoveryRetainedIDsData = encoded
+            }
+        }
     }
     var hasCorruptRecoveryJournal: Bool {
         if let data = recoveryAuditData, (try? JSONDecoder().decode([RecoveryAuditEntry].self, from: data)) == nil { return true }
         if let data = recoveryRetainedIDsData, (try? JSONDecoder().decode([String].self, from: data)) == nil { return true }
         return false
+    }
+    /// True only while active, unresolved recovery work remains (blocks auto-purge / reports sync problem).
+    var hasUnresolvedRecoveryState: Bool {
+        pendingCreateOperationID != nil || recoveryPendingDeleteID != nil ||
+        !recoveryRetainedRemoteIDs.isEmpty || hasCorruptRecoveryJournal ||
+        (recoveryPaused && syncStatus == .error) ||
+        (recoveryBlocksAutomaticRecreate && syncStatus != .synced)
     }
     var hasRecoveryHistory: Bool {
         pendingCreateOperationID != nil || recoveryPaused || recoveryPendingDeleteID != nil ||
@@ -77,14 +99,22 @@ final class StickyNote {
     }
     var pendingCleanupRemoteIDs: [String] {
         get { pendingCleanupIDsData.flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? [] }
-        set { pendingCleanupIDsData = try? JSONEncoder().encode(newValue) }
+        set {
+            // Never overwrite corrupt sync cleanup journal bytes silently.
+            guard !hasCorruptSyncJournal else { return }
+            if newValue.isEmpty {
+                pendingCleanupIDsData = nil
+            } else if let encoded = try? JSONEncoder().encode(newValue) {
+                pendingCleanupIDsData = encoded
+            }
+        }
     }
     var hasCorruptSyncJournal: Bool {
         guard let data = pendingCleanupIDsData else { return false }
         return (try? JSONDecoder().decode([String].self, from: data)) == nil
     }
     var requiresRemoteCleanup: Bool {
-        remoteId != nil || pendingCreateOperationID != nil || hasCorruptSyncJournal || !pendingCleanupRemoteIDs.isEmpty || hasRecoveryHistory
+        remoteId != nil || pendingCreateOperationID != nil || hasCorruptSyncJournal || !pendingCleanupRemoteIDs.isEmpty || hasUnresolvedRecoveryState
     }
 
     var syncStatus: SyncStatus {

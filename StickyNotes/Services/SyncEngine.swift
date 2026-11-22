@@ -68,9 +68,52 @@ final class SyncEngine {
     private var periodicTimer: Timer?
     private let debounceNanoseconds: UInt64
     private var fullSyncRunning = false
+    private var pullInProgress = false
+    private var pullWaiters: [CheckedContinuation<Void, Never>] = []
+    private var syncTimelineTick: UInt64 = 0
+    private var noteLastUploadedTick: [UUID: UInt64] = [:]
+    private var recentlyPulledWhileCreating: Set<UUID> = []
     private var uploadingNoteIDs: Set<UUID> = []
     private var uploadWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     func uploadWaiterCount(for id: UUID) -> Int { uploadWaiters[id]?.count ?? 0 }
+
+    private func nextSyncTick() -> UInt64 {
+        syncTimelineTick &+= 1
+        return syncTimelineTick
+    }
+    private func waitForPullToFinish() async {
+        guard pullInProgress else { return }
+        await withCheckedContinuation { pullWaiters.append($0) }
+    }
+    private func finishPullGate() {
+        pullInProgress = false
+        let waiters = pullWaiters
+        pullWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func resetForSignOut() {
+        for task in debounceTasks.values { task.cancel() }
+        debounceTasks.removeAll()
+        debounceTokens.removeAll()
+        incompleteTaskCount = 0
+        state = .offline
+    }
+
+    private static func isGuaranteedPreTransmissionError(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .notConnectedToInternet,
+             .cannotFindHost,
+             .dnsLookupFailed,
+             .cannotConnectToHost,
+             .dataNotAllowed,
+             .internationalRoamingOff:
+            return true
+        default:
+            return false
+        }
+    }
 
     private func acquireUpload(_ id: UUID) async {
         if uploadingNoteIDs.insert(id).inserted { return }
@@ -234,6 +277,9 @@ final class SyncEngine {
             self.state = .idle
             self.lastSyncDate = Date()
         } catch is CancellationError {
+            if activeScheduledPushCount == 0 {
+                self.state = authManager.isAuthenticated ? .idle : .offline
+            }
             return
         } catch {
             print("Sync failed: code=\((error as NSError).code)")
@@ -246,6 +292,10 @@ final class SyncEngine {
     // MARK: - Pull Remote Notes
 
     private func pullNotes(token: String, modelContext: ModelContext, scope: Scope, retryAuthOnFailure: Bool = true) async throws {
+        let pullStartTick = nextSyncTick()
+        pullInProgress = true
+        defer { finishPullGate() }
+
         let lidId = NoteConverter.pidLidNoteColorPropertyId
         let webId = NoteConverter.webNoteJSONPropertyId
         let iconId = NoteConverter.pidTagIconIndexPropertyId
@@ -317,13 +367,19 @@ final class SyncEngine {
             }
         }
 
+        let hasInFlightCreate = localNotes.contains {
+            $0.ownerAccountID == scope.accountID && uploadingNoteIDs.contains($0.id) && $0.remoteId == nil
+        }
         var seenRemoteIDs: Set<String> = []
         for msg in messages {
-            guard let remoteId = msg["id"] as? String,
-                  let changeKey = msg["changeKey"] as? String else {
+            guard let remoteId = msg["id"] as? String else {
                 continue
             }
+            // Record presence before checking changeKey so a message missing changeKey is never misclassified as deleted.
             seenRemoteIDs.insert(remoteId)
+            guard let changeKey = msg["changeKey"] as? String else {
+                continue
+            }
 
             let bodyObj = msg["body"] as? [String: Any]
             let htmlContent = (bodyObj?["content"] as? String) ?? ""
@@ -350,6 +406,9 @@ final class SyncEngine {
 
             if let localNote = existingLocal {
                 if localNote.hasCorruptSyncJournal { continue }
+                // Skip notes currently uploading or finished uploading after this pull started so an older GET snapshot
+                // cannot overwrite an in-flight upload or manufacture a spurious conflict copy.
+                if uploadingNoteIDs.contains(localNote.id) || (noteLastUploadedTick[localNote.id] ?? 0) > pullStartTick { continue }
                 // An unresolved POST may have committed. Keep its original content/metadata frozen
                 // for explicit reconciliation; don't turn it into an auto-uploadable conflict copy.
                 if localNote.pendingCreateOperationID != nil || localNote.recoveryPaused || localNote.recoveryPendingDeleteID != nil || localNote.hasCorruptRecoveryJournal { continue }
@@ -413,7 +472,24 @@ final class SyncEngine {
                         localNote.syncStatus = .synced
                         localNote.lastSyncedAt = Date()
                     } else {
-                        // Local is newer, let push step upload local
+                        // Local is newer: preserve diverging cloud edits as a conflict copy before local upload overwrites remote.
+                        if plainText != localNote.plainTextContent {
+                            let cloudCopy = StickyNote(
+                                color: noteColor,
+                                content: plainText,
+                                ownerAccountID: scope.accountID,
+                                syncStatus: .pendingUpload
+                            )
+                            let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
+                            cloudCopy.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
+                            cloudCopy.webNoteJSON = webNoteJSON
+                            cloudCopy.createdAt = remoteCreatedDate ?? Date()
+                            cloudCopy.modifiedAt = remoteModifiedDate ?? Date()
+                            modelContext.insert(cloudCopy)
+                            colorLedger.markCarry(cloudCopy.id)
+                            ColorDiagnostics.guardDecision(path: "conflict-copy", remoteID: remoteId, dirty: false, policy: "carryCached", detail: "local-newer")
+                            localNote.changeKey = changeKey
+                        }
                         continue
                     }
                 } else {
@@ -449,6 +525,9 @@ final class SyncEngine {
                 newNote.ownerAccountID = scope.accountID
                 newNote.webNoteJSON = webNoteJSON
                 modelContext.insert(newNote)
+                if hasInFlightCreate {
+                    recentlyPulledWhileCreating.insert(newNote.id)
+                }
             }
         }
 
@@ -462,13 +541,22 @@ final class SyncEngine {
             if localNote.pendingCreateOperationID != nil || localNote.recoveryPaused ||
                 localNote.recoveryPendingDeleteID != nil || localNote.hasRecoveryHistory ||
                 !localNote.pendingCleanupRemoteIDs.isEmpty { continue }
-            if uploadingNoteIDs.contains(localNote.id) { continue }
+            if uploadingNoteIDs.contains(localNote.id) || (noteLastUploadedTick[localNote.id] ?? 0) > pullStartTick { continue }
             debounceTasks[localNote.id]?.cancel()
             debounceTasks.removeValue(forKey: localNote.id)
             debounceTokens.removeValue(forKey: localNote.id)
             colorLedger.clearDirty(localNote.id)
             colorLedger.clearCarry(localNote.id)
-            modelContext.delete(localNote)
+            if !localNote.audioRecordings.isEmpty {
+                // Audio recordings are local-only; detach from cloud instead of destroying user voice memos.
+                localNote.remoteId = nil
+                localNote.changeKey = nil
+                localNote.lastSyncedAt = nil
+                localNote.recoveryPaused = true
+                localNote.syncStatus = .synced
+            } else {
+                modelContext.delete(localNote)
+            }
         }
 
         try validate(scope)
@@ -553,11 +641,13 @@ final class SyncEngine {
         if note.syncStatus == .synced { return }
         do {
             try await uploadLocked(note, token: token, retryAuthOnFailure: retryAuthOnFailure, scope: scope)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             if !note.isDeleted && !note.isDeletedLocally &&
                 !(note.syncStatus == .synced && !note.pendingCleanupRemoteIDs.isEmpty) {
                 note.syncStatus = .error
-                try saveDurably(note)
+                try? saveDurably(note)
             }
             throw error
         }
@@ -757,7 +847,20 @@ final class SyncEngine {
         // Correlation ONLY. Graph does not promise idempotency for this header.
         request.setValue(operationID, forHTTPHeaderField: "client-request-id")
         request.httpBody = body
-        let (data, response) = try await scopedData(for: request, scope: scope)
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await scopedData(for: request, scope: scope)
+        } catch {
+            // Only errors guaranteed to occur BEFORE any request bytes left the host (offline/DNS/connect refusal)
+            // may safely clear the pending-create lock; mid-flight timeouts/disconnects stay locked for recovery.
+            if Self.isGuaranteedPreTransmissionError(error), !note.isDeleted, note.pendingCreateOperationID == operationID {
+                note.pendingCreateOperationID = nil
+                note.pendingCreateEndpoint = nil
+                note.pendingCreateStartedAt = nil
+                try? saveDurably(note)
+            }
+            throw error
+        }
         guard let httpResponse = response as? HTTPURLResponse else {
             throw syncError(-30, "创建结果待确认：没有有效响应，已阻止自动重建。")
         }
@@ -793,6 +896,22 @@ final class SyncEngine {
             }
             if let oldID = note.remoteId, oldID != newId, !note.pendingCleanupRemoteIDs.contains(oldID) {
                 note.pendingCleanupRemoteIDs.append(oldID)
+            }
+            // Deduplicate ONLY if a concurrent pull imported the same newly-created cloud object while POST was in flight.
+            if !recentlyPulledWhileCreating.isEmpty,
+               let context = note.modelContext,
+               let allNotes = try? context.fetch(FetchDescriptor<StickyNote>()) {
+                for dup in allNotes where recentlyPulledWhileCreating.contains(dup.id) &&
+                    dup.id != note.id &&
+                    dup.ownerAccountID == note.ownerAccountID &&
+                    dup.remoteId == newId &&
+                    !uploadingNoteIDs.contains(dup.id) &&
+                    !dup.hasRecoveryHistory &&
+                    dup.audioRecordings.isEmpty &&
+                    dup.syncStatus == .synced {
+                    recentlyPulledWhileCreating.remove(dup.id)
+                    context.delete(dup)
+                }
             }
             note.remoteId = newId
             note.changeKey = newChangeKey
@@ -850,6 +969,7 @@ final class SyncEngine {
         colorLedger.clearCarry(note.id)
         note.syncStatus = unchanged ? .synced : .pendingUpload
         note.lastSyncedAt = Date()
+        noteLastUploadedTick[note.id] = nextSyncTick()
         try saveDurably(note)
     }
 
@@ -1013,6 +1133,10 @@ final class SyncEngine {
             // not cancellation of this non-idempotent request.
             guard authManager.isAuthenticated else { return }
 
+            if pullInProgress {
+                await waitForPullToFinish()
+            }
+
             let descriptor = FetchDescriptor<StickyNote>(
                 predicate: #Predicate<StickyNote> { $0.id == noteID }
             )
@@ -1029,11 +1153,22 @@ final class SyncEngine {
                 try modelContext.save()
                 try ensureNoPendingWork(modelContext: modelContext, scope: scope)
                 incompleteTaskCount = 0
-                self.state = .idle
+                if !fullSyncRunning {
+                    self.state = .idle
+                }
                 self.lastSyncDate = Date()
             } catch is CancellationError {
+                if !fullSyncRunning && activeScheduledPushCount <= 1 {
+                    self.state = authManager.isAuthenticated ? .idle : .offline
+                }
                 return
             } catch {
+                guard (try? validate(scope)) != nil else {
+                    if !fullSyncRunning && activeScheduledPushCount <= 1 {
+                        self.state = authManager.isAuthenticated ? .idle : .offline
+                    }
+                    return
+                }
                 print("Debounced push failed: code=\((error as NSError).code)")
                 if !note.isDeleted && !note.isDeletedLocally &&
                     !(note.syncStatus == .synced && !note.pendingCleanupRemoteIDs.isEmpty) { note.syncStatus = .error }
@@ -1045,6 +1180,91 @@ final class SyncEngine {
     }
 
     // MARK: - Delete Note Remotely
+
+    /// Guarded deletion entry point for UI surfaces: respects recovery/pending-create/corrupt-journal
+    /// protections before firing an immediate remote DELETE, and cleans up the local tombstone once confirmed.
+    func canSendImmediateRemoteDelete(_ note: StickyNote) -> Bool {
+        note.pendingCreateOperationID == nil &&
+        !note.recoveryPaused &&
+        note.recoveryPendingDeleteID == nil &&
+        !note.hasCorruptSyncJournal &&
+        !note.hasCorruptRecoveryJournal
+    }
+
+    func requestDeletion(of note: StickyNote, in modelContext: ModelContext) throws {
+        try prepareForDeletion(note, modelContext: modelContext)
+        let noteID = note.id
+        let remoteId = note.remoteId
+        let ownerAccountID = note.ownerAccountID
+        let allowImmediateDelete = canSendImmediateRemoteDelete(note)
+
+        if note.requiresRemoteCleanup {
+            if remoteId != nil && allowImmediateDelete {
+                note.syncStatus = .pendingUpload
+                try? modelContext.save()
+                deleteRemoteNoteAndCleanup(noteID: noteID, remoteId: remoteId!, ownerAccountID: ownerAccountID, modelContext: modelContext)
+            } else {
+                // Keep tombstone durable for pushPendingDeletes / Recovery Review; do NOT send raw DELETE
+                // while an uncertain POST, recovery pause, or corrupt journal protects the cloud object.
+                note.syncStatus = .error
+                try? modelContext.save()
+            }
+        } else {
+            if note.hasRecoveryHistory {
+                note.recoveryPaused = true
+                note.syncStatus = .synced
+            } else {
+                modelContext.delete(note)
+            }
+            try? modelContext.save()
+        }
+    }
+
+    private func deleteRemoteNoteAndCleanup(noteID: UUID, remoteId: String, ownerAccountID: String?, modelContext: ModelContext) {
+        guard let scope = try? currentScope(), ownerAccountID == scope.accountID else { return }
+        pendingRemoteDeletes[scope.accountID, default: []].insert(remoteId)
+        Task {
+            await acquireUpload(noteID)
+            defer { releaseUpload(noteID) }
+            guard authManager.isAuthenticated else {
+                if !fullSyncRunning { self.state = .error("Delete pending until signed in") }
+                return
+            }
+            do {
+                try validate(scope)
+                let token = try await authManager.getValidAccessToken()
+                try validate(scope)
+                try await performRemoteDelete(remoteId: remoteId, token: token, scope: scope)
+                try validate(scope)
+                let descriptor = FetchDescriptor<StickyNote>(predicate: #Predicate<StickyNote> { $0.id == noteID })
+                if let note = try? modelContext.fetch(descriptor).first, !note.isDeleted, note.isDeletedLocally {
+                    if note.remoteId == remoteId { note.remoteId = nil }
+                    note.pendingCleanupRemoteIDs.removeAll { $0 == remoteId }
+                    if note.remoteId == nil && note.pendingCreateOperationID == nil &&
+                        note.pendingCleanupRemoteIDs.isEmpty && !note.hasUnresolvedRecoveryState {
+                        if note.hasRecoveryHistory {
+                            note.recoveryPaused = true
+                            note.syncStatus = .synced
+                        } else {
+                            modelContext.delete(note)
+                        }
+                    }
+                    try? modelContext.save()
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard (try? validate(scope)) != nil else { return }
+                print("Delete failed: code=\((error as NSError).code)")
+                let descriptor = FetchDescriptor<StickyNote>(predicate: #Predicate<StickyNote> { $0.id == noteID })
+                if let note = try? modelContext.fetch(descriptor).first, !note.isDeleted, note.isDeletedLocally {
+                    note.syncStatus = .error
+                    try? modelContext.save()
+                }
+                self.state = .error(error.localizedDescription)
+            }
+        }
+    }
 
     func deleteRemoteNote(remoteId: String, ownerAccountID: String?) {
         guard let scope = try? currentScope(), ownerAccountID == scope.accountID else { return }
@@ -1062,6 +1282,7 @@ final class SyncEngine {
             } catch is CancellationError {
                 return
             } catch {
+                guard (try? validate(scope)) != nil else { return }
                 print("Delete failed: code=\((error as NSError).code)")
                 self.state = .error(error.localizedDescription)
             }
@@ -1069,8 +1290,7 @@ final class SyncEngine {
     }
 
     private func isProblem(_ note: StickyNote) -> Bool {
-        if note.pendingCreateOperationID != nil || note.recoveryPendingDeleteID != nil ||
-            !note.recoveryRetainedRemoteIDs.isEmpty || note.hasCorruptSyncJournal || note.hasCorruptRecoveryJournal { return true }
+        if note.hasUnresolvedRecoveryState || note.hasCorruptSyncJournal { return true }
         if note.recoveryPaused { return note.syncStatus == .error } // automatic conflict pause remains unresolved
         if !note.isDeletedLocally && note.pendingCleanupRemoteIDs.isEmpty && isUntouchedBlankNewNote(note) {
             return false
@@ -1116,7 +1336,9 @@ final class SyncEngine {
         for remoteId in ids {
             do {
                 try await performRemoteDelete(remoteId: remoteId, token: token, scope: scope)
-                for note in localNotes where !note.isDeleted {
+                for note in localNotes where !note.isDeleted &&
+                    !note.recoveryPaused && note.pendingCreateOperationID == nil &&
+                    note.recoveryPendingDeleteID == nil && !note.hasCorruptRecoveryJournal {
                     if note.remoteId == remoteId && note.isDeletedLocally { note.remoteId = nil }
                     note.pendingCleanupRemoteIDs.removeAll { $0 == remoteId }
                 }
@@ -1131,8 +1353,15 @@ final class SyncEngine {
             }
         }
         for note in localNotes where !note.isDeleted && note.isDeletedLocally &&
-            note.remoteId == nil && note.pendingCreateOperationID == nil && note.pendingCleanupRemoteIDs.isEmpty && !note.hasRecoveryHistory {
-            modelContext.delete(note)
+            note.remoteId == nil && note.pendingCreateOperationID == nil &&
+            note.pendingCleanupRemoteIDs.isEmpty && !note.hasUnresolvedRecoveryState {
+            if note.hasRecoveryHistory {
+                // Keep historical recovery audit visible in Recovery Review without blocking future syncs.
+                note.recoveryPaused = true
+                note.syncStatus = .synced
+            } else {
+                modelContext.delete(note)
+            }
         }
         try modelContext.save()
         // Per-record errors are retained, but MUST NOT starve unrelated safe uploads.

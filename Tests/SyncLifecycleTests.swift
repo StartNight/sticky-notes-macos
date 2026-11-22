@@ -292,4 +292,107 @@ final class SyncLifecycleTests: XCTestCase {
         }
         XCTAssertTrue(MockURLProtocol.requests.isEmpty)
     }
+
+    // MARK: Phase 2 Regression Tests (C-06, H-05, H-06, H-07, H-08, H-09, H-11)
+
+    func testOfflineCreateClearsPendingIntentAndUploadsWhenBackOnline() async throws {
+        let local = note("offline-note")
+        MockURLProtocol.handler = { _ in .failure(.notConnectedToInternet) }
+        do { try await engine.uploadNote(local, token: "fake"); XCTFail("Expected offline error") } catch {}
+        XCTAssertNil(local.pendingCreateOperationID, "断网前失败不应把新便笺锁死在恢复队列")
+        XCTAssertEqual(local.syncStatus, .error)
+
+        MockURLProtocol.handler = { _ in .http(status: 201, json: ["id": "online-created", "changeKey": "ck1"]) }
+        try await engine.uploadNote(local, token: "fake")
+        XCTAssertEqual(local.remoteId, "online-created")
+        XCTAssertEqual(local.syncStatus, .synced)
+    }
+
+    func testDeletingNoteWithHistoricalRecoveryAuditDoesNotDeadlockSync() async throws {
+        let local = note("was-recovered", remote: "R-HIST")
+        local.syncStatus = .synced
+        local.recoveryAudit = [RecoveryAuditEntry(accountID: "test-account", action: "associate-user-attested-exact-object",
+                                                  reason: "verified", priorOperationID: nil, remoteID: "R-HIST", kind: .graphNote, changeKey: "ck")]
+        try context.save()
+        XCTAssertTrue(local.hasRecoveryHistory)
+        XCTAssertFalse(local.hasUnresolvedRecoveryState)
+
+        try engine.prepareForDeletion(local, modelContext: context)
+        MockURLProtocol.handler = { req in
+            req.httpMethod == "GET" ? .http(status: 200, json: ["value": []]) : .http(status: 204, json: nil)
+        }
+        await engine.syncAll(modelContext: context)
+        XCTAssertEqual(engine.state, .idle, "删除仅有历史审计的便笺后同步应正常恢复 idle")
+        XCTAssertNotNil(engine.lastSyncDate)
+        XCTAssertNil(local.remoteId)
+        XCTAssertTrue(local.recoveryPaused)
+    }
+
+    func testRequestDeletionBlocksImmediateDeleteWhenPendingCreateExists() async throws {
+        let local = note("uncertain-replace", remote: "R-OLD")
+        local.pendingCreateOperationID = "op-in-flight"
+        try context.save()
+        MockURLProtocol.handler = { _ in .http(status: 204, json: nil) }
+        try engine.requestDeletion(of: local, in: context)
+        try await Task.sleep(nanoseconds: 25_000_000)
+        XCTAssertTrue(MockURLProtocol.requests.isEmpty, "存在未决创建时不得立即发云端 DELETE")
+        XCTAssertTrue(local.isDeletedLocally)
+        XCTAssertEqual(local.remoteId, "R-OLD")
+    }
+
+    func testPullInFlightDoesNotDeleteNoteCreatedConcurrently() async throws {
+        let local = note("just-created")
+        MockURLProtocol.holdMethods = ["GET"]
+        MockURLProtocol.handler = { req in
+            if req.httpMethod == "GET" { return .http(status: 200, json: ["value": []]) }
+            return .http(status: 201, json: ["id": "R-NEW", "changeKey": "ck-new"])
+        }
+        let pullTask = Task { await self.engine.syncAll(modelContext: self.context) }
+        try await waitUntil { MockURLProtocol.heldCount == 1 }
+        // Upload finishes BEFORE the held GET returns; GET's seenRemoteIDs does NOT contain R-NEW.
+        try await engine.uploadNote(local, token: "fake")
+        XCTAssertEqual(local.remoteId, "R-NEW")
+        XCTAssertEqual(local.syncStatus, .synced)
+        MockURLProtocol.releaseNext()
+        await pullTask.value
+        let remaining = try context.fetch(FetchDescriptor<StickyNote>())
+        XCTAssertEqual(remaining.count, 1, "旧 GET 快照绝不能误删并发刚上传成功的新便笺")
+        XCTAssertEqual(remaining.first?.remoteId, "R-NEW")
+    }
+
+    func testCloudDeletionPreservesLocalAudioRecordingsAndMissingChangeKeyDoesNotDelete() async throws {
+        let audioNote = note("with-voice", remote: "R-AUDIO")
+        audioNote.syncStatus = .synced
+        audioNote.audioRecordings = [Data([0xAA, 0xBB])]
+        let noChangeKeyNote = note("missing-ck", remote: "R-NOCK")
+        noChangeKeyNote.syncStatus = .synced
+        try context.save()
+
+        MockURLProtocol.handler = { _ in
+            // R-AUDIO absent (deleted in cloud), R-NOCK present but missing changeKey
+            .http(status: 200, json: ["value": [["id": "R-NOCK", "body": ["content": "<div>missing-ck</div>"]]]])
+        }
+        await engine.syncAll(modelContext: context)
+        XCTAssertFalse(audioNote.isDeleted, "含本地录音的便笺被云端删除时应脱钩保留而非销毁")
+        XCTAssertNil(audioNote.remoteId)
+        XCTAssertEqual(audioNote.audioRecordings, [Data([0xAA, 0xBB])])
+        XCTAssertTrue(audioNote.recoveryPaused)
+
+        XCTAssertFalse(noChangeKeyNote.isDeleted, "云端条目缺失 changeKey 时不得当作已删除")
+        XCTAssertEqual(noChangeKeyNote.remoteId, "R-NOCK")
+    }
+
+    func testCorruptJournalSettersNeverOverwriteRawCorruptBytes() throws {
+        let local = note("corrupt", remote: "R-1")
+        let rawSync = Data("bad-sync-json".utf8)
+        let rawAudit = Data("bad-audit-json".utf8)
+        local.pendingCleanupIDsData = rawSync
+        local.recoveryAuditData = rawAudit
+        XCTAssertTrue(local.hasCorruptSyncJournal)
+        XCTAssertTrue(local.hasCorruptRecoveryJournal)
+        local.pendingCleanupRemoteIDs.append("x")
+        local.recoveryAudit.append(RecoveryAuditEntry(accountID: "a", action: "t", reason: "r", priorOperationID: nil, remoteID: nil, kind: nil, changeKey: nil))
+        XCTAssertEqual(local.pendingCleanupIDsData, rawSync, "损坏同步日志不得被 setter 静默覆盖")
+        XCTAssertEqual(local.recoveryAuditData, rawAudit, "损坏恢复日志不得被 setter 静默覆盖")
+    }
 }
