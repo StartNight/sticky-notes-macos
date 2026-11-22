@@ -43,6 +43,13 @@ targets:
         Release:
           # Release must not carry the debugger entitlement (com.apple.security.get-task-allow).
           CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+          # Binary size optimization while keeping Universal (arm64 + x86_64) compatibility.
+          DEAD_CODE_STRIPPING: YES
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: all
+          STRIP_SWIFT_SYMBOLS: YES
+          ENABLE_PREVIEWS: NO
 
   # QA: unit-test bundle WITHOUT host app.
   # Hosting would launch the real app, which opens the user's real SwiftData store and
