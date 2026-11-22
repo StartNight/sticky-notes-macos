@@ -471,6 +471,7 @@ final class SyncEngine {
             modelContext.delete(localNote)
         }
 
+        try validate(scope)
         try modelContext.save()
         skippedCloudCreateCount = skippedCloudCreates
     }

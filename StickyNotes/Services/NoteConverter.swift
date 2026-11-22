@@ -4,41 +4,15 @@ import CryptoKit
 import os
 
 struct NoteConverter {
-    // MARK: - HTML to NSAttributedString
+    // MARK: - HTML to NSAttributedString (Offline Safe Parser)
 
+    /// Parses cloud/Outlook HTML completely offline without WebKit, external subresource loading,
+    /// `file://` access, or main-thread `RunLoop` pumping.
     static func htmlToAttributedString(_ html: String) -> NSAttributedString {
         guard !html.isEmpty else {
             return NSAttributedString(string: "", attributes: defaultAttributes)
         }
-
-        // Clean up common Windows/Outlook HTML artifacts if present
-        let preprocessedHtml = preprocessHtml(html)
-
-        guard let data = preprocessedHtml.data(using: .utf8) else {
-            return NSAttributedString(string: html, attributes: defaultAttributes)
-        }
-
-        let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
-            .documentType: NSAttributedString.DocumentType.html,
-            .characterEncoding: String.Encoding.utf8.rawValue
-        ]
-
-        guard let parsed = try? NSMutableAttributedString(data: data, options: options, documentAttributes: nil) else {
-            // Fallback to plain text if HTML parsing fails
-            return NSAttributedString(string: extractPlainText(from: html), attributes: defaultAttributes)
-        }
-
-        // Normalize fonts to System Font 14 while preserving bold and italic traits
-        normalizeFonts(in: parsed)
-
-        // Ensure text color is appropriate for current theme
-        normalizeColors(in: parsed)
-
-        // AppKit's HTML importer appends a trailing newline for block-level tags
-        // such as </div>. Strip extras so repeated round-trips stay a fixed point.
-        trimTrailingHTMLNewlines(in: parsed)
-
-        return parsed
+        return OfflineHTMLParser.parse(html)
     }
 
     // MARK: - NSAttributedString to HTML
@@ -458,58 +432,6 @@ struct NoteConverter {
         ]
     }
 
-    private static func preprocessHtml(_ html: String) -> String {
-        var result = html
-        // Wrap with UTF-8 meta to avoid encoding misdetections
-        if !result.contains("<meta charset") && !result.contains("<meta http-equiv=\"Content-Type\"") {
-            result = "<html><head><meta charset=\"utf-8\"></head><body>\(result)</body></html>"
-        }
-        return result
-    }
-
-    private static func normalizeFonts(in attrStr: NSMutableAttributedString) {
-        let fullRange = NSRange(location: 0, length: attrStr.length)
-        attrStr.enumerateAttribute(.font, in: fullRange, options: []) { value, range, _ in
-            let isBold: Bool
-            let isItalic: Bool
-            if let font = value as? NSFont {
-                let traits = font.fontDescriptor.symbolicTraits
-                isBold = traits.contains(.bold)
-                isItalic = traits.contains(.italic)
-            } else {
-                isBold = false
-                isItalic = false
-            }
-
-            var font = NSFont.systemFont(ofSize: 14)
-            var traits: NSFontDescriptor.SymbolicTraits = []
-            if isBold { traits.insert(.bold) }
-            if isItalic { traits.insert(.italic) }
-
-            if !traits.isEmpty {
-                let desc = font.fontDescriptor.withSymbolicTraits(traits)
-                font = NSFont(descriptor: desc, size: 14) ?? font
-            }
-
-            attrStr.removeAttribute(.font, range: range)
-            attrStr.addAttribute(.font, value: font, range: range)
-        }
-    }
-
-    private static func normalizeColors(in attrStr: NSMutableAttributedString) {
-        let fullRange = NSRange(location: 0, length: attrStr.length)
-        attrStr.enumerateAttribute(.foregroundColor, in: fullRange, options: []) { value, range, _ in
-            guard let color = value as? NSColor else {
-                attrStr.addAttribute(.foregroundColor, value: NSColor.textColor, range: range)
-                return
-            }
-            // If the text color is black in dark mode or pure white in light mode, use dynamic textColor
-            if color == NSColor.black || color == NSColor.white {
-                attrStr.addAttribute(.foregroundColor, value: NSColor.textColor, range: range)
-            }
-        }
-    }
-
     private static func colorToHex(_ color: NSColor) -> String? {
         guard let rgb = color.usingColorSpace(.sRGB) else { return nil }
         // Don't encode standard default text colors into HTML
@@ -532,48 +454,509 @@ struct NoteConverter {
     }
 
     private static func unescapeHtml(_ string: String) -> String {
-        var unescaped = decodeNumericHtmlEntities(string)
-        unescaped = unescaped.replacingOccurrences(of: "&quot;", with: "\"")
-        unescaped = unescaped.replacingOccurrences(of: "&apos;", with: "'")
-        unescaped = unescaped.replacingOccurrences(of: "&gt;", with: ">")
-        unescaped = unescaped.replacingOccurrences(of: "&lt;", with: "<")
-        unescaped = unescaped.replacingOccurrences(of: "&nbsp;", with: " ")
-        unescaped = unescaped.replacingOccurrences(of: "&amp;", with: "&")
-        return unescaped
+        guard string.contains("&") else { return string }
+        var output = ""
+        output.reserveCapacity(string.count)
+        var index = string.startIndex
+        let end = string.endIndex
+
+        while index < end {
+            let ch = string[index]
+            if ch == "&" {
+                let searchStart = string.index(after: index)
+                var scan = searchStart
+                var steps = 0
+                var semi: String.Index?
+                while scan < end && steps < 14 {
+                    let c = string[scan]
+                    if c == ";" {
+                        semi = scan
+                        break
+                    }
+                    if c == "&" || c.isWhitespace || c == "<" {
+                        break
+                    }
+                    scan = string.index(after: scan)
+                    steps += 1
+                }
+                if let semi, let decoded = decodeSingleEntity(string[searchStart..<semi]) {
+                    output.append(decoded)
+                    index = string.index(after: semi)
+                    continue
+                }
+            }
+            output.append(ch)
+            index = string.index(after: index)
+        }
+        return output
     }
 
-    /// Decode &#NNN; and &#xHH; numeric entities. NBSP (160) becomes a regular
-    /// space to match `&nbsp;` handling used by titles/previews.
-    private static func decodeNumericHtmlEntities(_ string: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: "&#(x[0-9a-fA-F]+|[0-9]+);", options: .caseInsensitive) else {
-            return string
-        }
-        let nsString = string as NSString
-        let matches = regex.matches(in: string, options: [], range: NSRange(location: 0, length: nsString.length))
-        var result = string
-        for match in matches.reversed() {
-            guard match.numberOfRanges >= 2,
-                  let fullRange = Range(match.range, in: result),
-                  let codeRange = Range(match.range(at: 1), in: result) else { continue }
-            let code = String(result[codeRange])
+    private static let namedEntities: [String: String] = [
+        "amp": "&",
+        "lt": "<",
+        "gt": ">",
+        "quot": "\"",
+        "apos": "'",
+        "nbsp": " ",
+        "mdash": "—",
+        "ndash": "–",
+        "hellip": "…",
+        "bull": "•",
+        "ldquo": "“",
+        "rdquo": "”",
+        "lsquo": "‘",
+        "rsquo": "’",
+        "copy": "©",
+        "reg": "®",
+        "trade": "™"
+    ]
+
+    private static func decodeSingleEntity(_ body: Substring) -> String? {
+        guard !body.isEmpty else { return nil }
+        if body.first == "#" {
+            let num = body.dropFirst()
+            guard !num.isEmpty else { return nil }
             let value: UInt32?
-            if code.lowercased().hasPrefix("x") {
-                value = UInt32(code.dropFirst(), radix: 16)
+            if num.first == "x" || num.first == "X" {
+                value = UInt32(num.dropFirst(), radix: 16)
             } else {
-                value = UInt32(code)
+                value = UInt32(num, radix: 10)
             }
-            guard let scalarValue = value else { continue }
-            let replacement: String
-            if scalarValue == 160 {
-                replacement = " "
-            } else if let scalar = Unicode.Scalar(scalarValue) {
-                replacement = String(Character(scalar))
-            } else {
-                continue
-            }
-            result.replaceSubrange(fullRange, with: replacement)
+            guard let scalarValue = value else { return nil }
+            if scalarValue == 160 { return " " }
+            guard let scalar = Unicode.Scalar(scalarValue) else { return nil }
+            return String(Character(scalar))
         }
-        return result
+        return namedEntities[body.lowercased()]
+    }
+
+    /// Offline HTML tokenizer & attributed-string builder (no WebKit, no network, no filesystem, no RunLoop pumping).
+    private enum OfflineHTMLParser {
+        private static let hiddenTextKey = NSAttributedString.Key("com.stickynotes.hiddenText")
+        private static let skipContainerTags: Set<String> = [
+            "head", "style", "script", "noscript", "iframe", "object", "embed", "applet", "svg", "math", "template"
+        ]
+        private static let blockTags: Set<String> = [
+            "div", "p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "tr"
+        ]
+        private static let voidTags: Set<String> = [
+            "br", "hr", "img", "meta", "link", "input", "area", "base", "col", "source", "track", "wbr"
+        ]
+        private static let maxInlineImageBytes = 5 * 1024 * 1024
+
+        private struct StyleState {
+            var bold = false
+            var italic = false
+            var underline = false
+            var strikethrough = false
+            var foregroundColor: NSColor?
+            var hidden = false
+            var link: URL?
+        }
+
+        static func parse(_ html: String) -> NSAttributedString {
+            let result = NSMutableAttributedString()
+            result.beginEditing()
+            defer { result.endEditing() }
+
+            let hasMarkup = html.contains("<") && html.contains(">")
+            var styleStack: [(tag: String, state: StyleState)] = []
+            var skipStack: [String] = []
+            var preDepth = 0
+            var pendingBlockBreak = false
+            var hasEmittedContent = false
+            var lastCharWasNewline = false
+
+            func currentStyle() -> StyleState {
+                styleStack.last?.state ?? StyleState()
+            }
+
+            func attributes(for state: StyleState) -> [NSAttributedString.Key: Any] {
+                var font = NSFont.systemFont(ofSize: 14)
+                var traits: NSFontDescriptor.SymbolicTraits = []
+                if state.bold { traits.insert(.bold) }
+                if state.italic { traits.insert(.italic) }
+                if !traits.isEmpty {
+                    let desc = font.fontDescriptor.withSymbolicTraits(traits)
+                    font = NSFont(descriptor: desc, size: 14) ?? font
+                }
+
+                var attrs: [NSAttributedString.Key: Any] = [
+                    .font: font,
+                    .foregroundColor: state.hidden
+                        ? NSColor(white: 0.15, alpha: 1.0)
+                        : (state.foregroundColor ?? NSColor.textColor)
+                ]
+                if state.hidden {
+                    attrs[.backgroundColor] = NSColor(white: 0.15, alpha: 1.0)
+                    attrs[hiddenTextKey] = true
+                }
+                if state.underline {
+                    attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
+                }
+                if state.strikethrough {
+                    attrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+                }
+                if let link = state.link {
+                    attrs[.link] = link
+                }
+                return attrs
+            }
+
+            func flushBlockBreakIfNeeded() {
+                if pendingBlockBreak && hasEmittedContent && !lastCharWasNewline {
+                    result.append(NSAttributedString(string: "\n", attributes: attributes(for: StyleState())))
+                    lastCharWasNewline = true
+                }
+                pendingBlockBreak = false
+            }
+
+            func emitText(_ raw: Substring) {
+                guard skipStack.isEmpty, !raw.isEmpty else { return }
+                var text = NoteConverter.unescapeHtml(String(raw))
+                if hasMarkup && preDepth == 0 {
+                    if text.contains("\n") || text.contains("\r") {
+                        if text.allSatisfy({ $0.isWhitespace }) {
+                            return
+                        }
+                        text = text
+                            .replacingOccurrences(of: "\r\n", with: " ")
+                            .replacingOccurrences(of: "\n", with: " ")
+                            .replacingOccurrences(of: "\r", with: " ")
+                    }
+                }
+                guard !text.isEmpty else { return }
+                flushBlockBreakIfNeeded()
+                result.append(NSAttributedString(string: text, attributes: attributes(for: currentStyle())))
+                hasEmittedContent = true
+                lastCharWasNewline = text.hasSuffix("\n")
+            }
+
+            func emitNewline() {
+                guard skipStack.isEmpty else { return }
+                flushBlockBreakIfNeeded()
+                result.append(NSAttributedString(string: "\n", attributes: attributes(for: currentStyle())))
+                hasEmittedContent = true
+                lastCharWasNewline = true
+            }
+
+            func emitInlineDataImageIfSafe(_ src: String) {
+                guard skipStack.isEmpty else { return }
+                let trimmed = src.trimmingCharacters(in: .whitespacesAndNewlines)
+                let lower = trimmed.lowercased()
+                guard lower.hasPrefix("data:image/"),
+                      let commaIdx = trimmed.firstIndex(of: ",") else { return }
+                let header = lower[..<commaIdx]
+                let allowedPrefixes = ["data:image/png", "data:image/jpeg", "data:image/jpg", "data:image/gif", "data:image/webp"]
+                guard header.contains(";base64"),
+                      allowedPrefixes.contains(where: { header.hasPrefix($0) }) else { return }
+                let b64 = String(trimmed[trimmed.index(after: commaIdx)...])
+                guard b64.utf8.count <= (maxInlineImageBytes * 4) / 3 + 16,
+                      let data = Data(base64Encoded: b64, options: .ignoreUnknownCharacters),
+                      data.count <= maxInlineImageBytes,
+                      let image = NSImage(data: data) else { return }
+                flushBlockBreakIfNeeded()
+                let attachment = NSTextAttachment()
+                attachment.image = image
+                let attachStr = NSMutableAttributedString(attachment: attachment)
+                attachStr.addAttributes(attributes(for: currentStyle()), range: NSRange(location: 0, length: attachStr.length))
+                result.append(attachStr)
+                hasEmittedContent = true
+                lastCharWasNewline = false
+            }
+
+            var index = html.startIndex
+            let end = html.endIndex
+
+            while index < end {
+                guard let lt = html[index...].firstIndex(of: "<") else {
+                    emitText(html[index..<end])
+                    break
+                }
+                if lt > index {
+                    emitText(html[index..<lt])
+                }
+
+                // Comment: <!-- ... -->
+                if html[lt...].hasPrefix("<!--") {
+                    let afterStart = html.index(lt, offsetBy: 4, limitedBy: end) ?? end
+                    if let closeRange = html[afterStart...].range(of: "-->") {
+                        index = closeRange.upperBound
+                    } else {
+                        break
+                    }
+                    continue
+                }
+
+                // Find closing '>' while respecting quoted attribute values
+                guard let gt = findTagEnd(in: html, from: lt) else {
+                    emitText(html[lt..<end])
+                    break
+                }
+
+                let inner = html[html.index(after: lt)..<gt].trimmingCharacters(in: .whitespacesAndNewlines)
+                index = html.index(after: gt)
+
+                guard !inner.isEmpty else { continue }
+                if inner.hasPrefix("!") || inner.hasPrefix("?") { continue }
+
+                let isClosing = inner.hasPrefix("/")
+                let selfClosing = !isClosing && inner.hasSuffix("/")
+                let tagBody = isClosing
+                    ? inner.dropFirst().trimmingCharacters(in: .whitespacesAndNewlines)
+                    : (selfClosing ? inner.dropLast().trimmingCharacters(in: .whitespacesAndNewlines) : inner)
+
+                let nameEnd = tagBody.firstIndex(where: { $0.isWhitespace || $0 == "/" }) ?? tagBody.endIndex
+                let tagName = tagBody[..<nameEnd].lowercased()
+                guard !tagName.isEmpty else { continue }
+
+                if isClosing {
+                    if !skipStack.isEmpty {
+                        if let matchIdx = skipStack.lastIndex(of: tagName) {
+                            skipStack.removeSubrange(matchIdx...)
+                        }
+                        continue
+                    }
+                    if tagName == "pre" {
+                        preDepth = max(0, preDepth - 1)
+                    }
+                    if blockTags.contains(tagName), hasEmittedContent, !lastCharWasNewline {
+                        pendingBlockBreak = true
+                    }
+                    if let matchIdx = styleStack.lastIndex(where: { $0.tag == tagName }) {
+                        styleStack.remove(at: matchIdx)
+                    }
+                    continue
+                }
+
+                if !skipStack.isEmpty {
+                    if skipContainerTags.contains(tagName) && !selfClosing {
+                        skipStack.append(tagName)
+                    }
+                    continue
+                }
+
+                if skipContainerTags.contains(tagName) {
+                    if !selfClosing {
+                        skipStack.append(tagName)
+                    }
+                    continue
+                }
+
+                if tagName == "br" {
+                    emitNewline()
+                    continue
+                }
+
+                let attrSubstring = nameEnd < tagBody.endIndex ? tagBody[nameEnd...] : ""
+                let attrs = parseAttributes(attrSubstring)
+
+                if tagName == "img" {
+                    if let src = attrs["src"] {
+                        emitInlineDataImageIfSafe(src)
+                    }
+                    continue
+                }
+
+                if blockTags.contains(tagName) {
+                    if hasEmittedContent && !lastCharWasNewline {
+                        pendingBlockBreak = true
+                    }
+                    if tagName == "pre" && !selfClosing {
+                        preDepth += 1
+                    }
+                }
+
+                if voidTags.contains(tagName) || selfClosing {
+                    continue
+                }
+
+                var nextState = currentStyle()
+                switch tagName {
+                case "b", "strong":
+                    nextState.bold = true
+                case "i", "em":
+                    nextState.italic = true
+                case "u":
+                    nextState.underline = true
+                case "s", "strike", "del":
+                    nextState.strikethrough = true
+                case "a":
+                    if let href = attrs["href"] {
+                        let decodedHref = NoteConverter.unescapeHtml(href).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if let url = URL(string: decodedHref), SafeURLPolicy.isAllowed(url) {
+                            nextState.link = url
+                            nextState.underline = true
+                            nextState.foregroundColor = NSColor.linkColor
+                        }
+                    }
+                case "font":
+                    if let colorVal = attrs["color"], let parsedColor = parseCSSColor(colorVal) {
+                        nextState.foregroundColor = normalizeImportedColor(parsedColor)
+                    }
+                default:
+                    break
+                }
+
+                if attrs["data-stickynotes-hidden"] == "1" {
+                    nextState.hidden = true
+                }
+
+                if let styleAttr = attrs["style"] {
+                    applyInlineCSS(NoteConverter.unescapeHtml(styleAttr), to: &nextState)
+                }
+
+                styleStack.append((tagName, nextState))
+            }
+
+            NoteConverter.trimTrailingHTMLNewlines(in: result)
+            return result
+        }
+
+        private static func findTagEnd(in html: String, from start: String.Index) -> String.Index? {
+            var idx = html.index(after: start)
+            var quote: Character?
+            while idx < html.endIndex {
+                let c = html[idx]
+                if let q = quote {
+                    if c == q { quote = nil }
+                } else {
+                    if c == "\"" || c == "'" {
+                        quote = c
+                    } else if c == ">" {
+                        return idx
+                    }
+                }
+                idx = html.index(after: idx)
+            }
+            return nil
+        }
+
+        private static func parseAttributes(_ raw: Substring) -> [String: String] {
+            var attrs: [String: String] = [:]
+            var idx = raw.startIndex
+            let end = raw.endIndex
+
+            while idx < end {
+                while idx < end && raw[idx].isWhitespace { idx = raw.index(after: idx) }
+                guard idx < end else { break }
+
+                let keyStart = idx
+                while idx < end && !raw[idx].isWhitespace && raw[idx] != "=" && raw[idx] != "/" {
+                    idx = raw.index(after: idx)
+                }
+                let key = raw[keyStart..<idx].lowercased()
+                while idx < end && raw[idx].isWhitespace { idx = raw.index(after: idx) }
+
+                guard !key.isEmpty else {
+                    if idx < end { idx = raw.index(after: idx) }
+                    continue
+                }
+
+                if idx < end && raw[idx] == "=" {
+                    idx = raw.index(after: idx)
+                    while idx < end && raw[idx].isWhitespace { idx = raw.index(after: idx) }
+                    guard idx < end else { break }
+                    if raw[idx] == "\"" || raw[idx] == "'" {
+                        let quote = raw[idx]
+                        idx = raw.index(after: idx)
+                        let valStart = idx
+                        while idx < end && raw[idx] != quote { idx = raw.index(after: idx) }
+                        attrs[key] = String(raw[valStart..<idx])
+                        if idx < end { idx = raw.index(after: idx) }
+                    } else {
+                        let valStart = idx
+                        while idx < end && !raw[idx].isWhitespace { idx = raw.index(after: idx) }
+                        attrs[key] = String(raw[valStart..<idx])
+                    }
+                } else {
+                    attrs[key] = ""
+                }
+            }
+            return attrs
+        }
+
+        private static func applyInlineCSS(_ css: String, to state: inout StyleState) {
+            for decl in css.split(separator: ";") {
+                guard let colon = decl.firstIndex(of: ":") else { continue }
+                let prop = decl[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let val = decl[decl.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                switch prop {
+                case "font-weight":
+                    if val == "bold" || val == "bolder" || (Int(val) ?? 0) >= 600 {
+                        state.bold = true
+                    } else if val == "normal" || (Int(val) ?? 700) < 600 {
+                        state.bold = false
+                    }
+                case "font-style":
+                    if val == "italic" || val == "oblique" {
+                        state.italic = true
+                    } else if val == "normal" {
+                        state.italic = false
+                    }
+                case "text-decoration", "text-decoration-line":
+                    if val.contains("underline") { state.underline = true }
+                    if val.contains("line-through") { state.strikethrough = true }
+                case "color":
+                    if let parsed = parseCSSColor(val) {
+                        state.foregroundColor = normalizeImportedColor(parsed)
+                    }
+                default:
+                    break
+                }
+            }
+        }
+
+        private static func parseCSSColor(_ raw: String) -> NSColor? {
+            let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if s.hasPrefix("#") {
+                let hex = String(s.dropFirst())
+                if hex.count == 6, let val = UInt32(hex, radix: 16) {
+                    let r = CGFloat((val >> 16) & 0xFF) / 255.0
+                    let g = CGFloat((val >> 8) & 0xFF) / 255.0
+                    let b = CGFloat(val & 0xFF) / 255.0
+                    return NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
+                } else if hex.count == 3, let val = UInt32(hex, radix: 16) {
+                    let r = CGFloat(((val >> 8) & 0xF) * 17) / 255.0
+                    let g = CGFloat(((val >> 4) & 0xF) * 17) / 255.0
+                    let b = CGFloat((val & 0xF) * 17) / 255.0
+                    return NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
+                }
+            } else if s.hasPrefix("rgb(") || s.hasPrefix("rgba(") {
+                guard let open = s.firstIndex(of: "("), let close = s.lastIndex(of: ")"), open < close else { return nil }
+                let parts = s[s.index(after: open)..<close].split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                guard parts.count >= 3,
+                      let r = Double(parts[0]), let g = Double(parts[1]), let b = Double(parts[2]) else { return nil }
+                let a = parts.count >= 4 ? (Double(parts[3]) ?? 1.0) : 1.0
+                return NSColor(srgbRed: CGFloat(min(max(r, 0), 255)) / 255.0,
+                               green: CGFloat(min(max(g, 0), 255)) / 255.0,
+                               blue: CGFloat(min(max(b, 0), 255)) / 255.0,
+                               alpha: CGFloat(min(max(a, 0), 1)))
+            }
+            switch s {
+            case "black": return NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
+            case "white": return NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+            case "red": return NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
+            case "green": return NSColor(srgbRed: 0, green: 0.5, blue: 0, alpha: 1)
+            case "blue": return NSColor(srgbRed: 0, green: 0, blue: 1, alpha: 1)
+            case "gray", "grey": return NSColor(srgbRed: 0.5, green: 0.5, blue: 0.5, alpha: 1)
+            case "orange": return NSColor(srgbRed: 1, green: 0.65, blue: 0, alpha: 1)
+            case "purple": return NSColor(srgbRed: 0.5, green: 0, blue: 0.5, alpha: 1)
+            case "pink": return NSColor(srgbRed: 1, green: 0.75, blue: 0.8, alpha: 1)
+            case "yellow": return NSColor(srgbRed: 1, green: 1, blue: 0, alpha: 1)
+            default: return nil
+            }
+        }
+
+        private static func normalizeImportedColor(_ color: NSColor) -> NSColor {
+            guard let rgb = color.usingColorSpace(.sRGB) else { return color }
+            let isNearBlack = rgb.redComponent < 0.05 && rgb.greenComponent < 0.05 && rgb.blueComponent < 0.05 && rgb.alphaComponent > 0.9
+            let isNearWhite = rgb.redComponent > 0.95 && rgb.greenComponent > 0.95 && rgb.blueComponent > 0.95 && rgb.alphaComponent > 0.9
+            if isNearBlack || isNearWhite {
+                return NSColor.textColor
+            }
+            return color
+        }
     }
 
     private static func trimTrailingHTMLNewlines(in attrStr: NSMutableAttributedString) {

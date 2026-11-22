@@ -98,15 +98,11 @@ struct NoteTextEditor: NSViewRepresentable {
         }
 
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
-            if let url = link as? URL {
+            if let url = SafeURLPolicy.validatedURL(from: link) {
                 NSWorkspace.shared.open(url)
-                return true
             }
-            if let urlString = link as? String, let url = URL(string: urlString) {
-                NSWorkspace.shared.open(url)
-                return true
-            }
-            return false
+            // Always return true so AppKit never falls back to opening rejected schemes (file://, smb://, etc.).
+            return true
         }
     }
 }
@@ -130,23 +126,26 @@ final class ClickableTextView: NSTextView {
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         let charIndex = characterIndexForInsertion(at: point)
+        let text = string as NSString
 
-        if charIndex < string.count {
-            let text = string as NSString
+        if charIndex != NSNotFound, charIndex < text.length {
             let clickRange = NSRange(location: charIndex, length: 0)
             let lineRange = text.lineRange(for: clickRange)
             let lineText = text.substring(with: lineRange)
 
             // Handle todo checkbox clicks (click near beginning of line)
-            if lineText.hasPrefix("☐ ") || lineText.hasPrefix("☑ ") {
-                let lineStartPoint = layoutManager!.boundingRect(
-                    forGlyphRange: NSRange(location: lineRange.location, length: 1),
-                    in: textContainer!
-                )
-                let relativeX = point.x - textContainerOrigin.x - lineStartPoint.origin.x
-                if relativeX < 20 {
-                    proxy?.toggleTodoAt(characterIndex: charIndex)
-                    return
+            if (lineText.hasPrefix("☐ ") || lineText.hasPrefix("☑ ")),
+               let layoutManager, let textContainer,
+               lineRange.location < text.length {
+                let prefixCharRange = NSRange(location: lineRange.location, length: 1)
+                let glyphRange = layoutManager.glyphRange(forCharacterRange: prefixCharRange, actualCharacterRange: nil)
+                if glyphRange.length > 0, NSMaxRange(glyphRange) <= layoutManager.numberOfGlyphs {
+                    let lineStartPoint = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+                    let relativeX = point.x - textContainerOrigin.x - lineStartPoint.origin.x
+                    if relativeX >= -4 && relativeX < 20 {
+                        proxy?.toggleTodoAt(characterIndex: charIndex)
+                        return
+                    }
                 }
             }
 

@@ -166,4 +166,72 @@ final class NoteConverterTests: XCTestCase {
         XCTAssertLessThan(elapsed, 5.0, "6 万字往返耗时 \(elapsed)s")
         print("QA_METRIC longTextRoundTrip chars=\(original.count) seconds=\(elapsed)")
     }
+
+    // MARK: Security & Offline HTML Safety (C-01, C-02)
+
+    func testOfflineHtmlStripsActiveAndExternalTagsWithoutNetwork() {
+        let hostile = """
+        <html><head><title>Hidden</title><style>body{background:url(https://evil.example/bg.png)}</style></head>
+        <body>
+        <script>alert('xss')</script>
+        <iframe src="https://evil.example/frame">frame text</iframe>
+        <img src="https://127.0.0.1:9/pixel.png" />
+        <img src="file:///etc/passwd" />
+        <div>Safe <b>Body</b></div>
+        </body></html>
+        """
+        let attr = NoteConverter.htmlToAttributedString(hostile)
+        XCTAssertEqual(attr.string, "Safe Body")
+        XCTAssertTrue(traits(attr, at: range(of: "Body", in: attr).location).contains(.bold))
+        // Verify no attachment was created for external/file images
+        var foundAttachment = false
+        attr.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attr.length)) { value, _, _ in
+            if value != nil { foundAttachment = true }
+        }
+        XCTAssertFalse(foundAttachment)
+    }
+
+    func testOfflineHtmlLinkSchemeFiltering() {
+        let html = """
+        <div>
+        <a href="https://example.com/path">HTTPS</a>
+        <a href="mailto:user@example.com">Mail</a>
+        <a href="file:///Applications/Calculator.app">FileLink</a>
+        <a href="smb://attacker.example/share">SMBLink</a>
+        <a href="javascript:alert(1)">JSLink</a>
+        <a href="shortcuts://run-shortcut?name=x">Shortcut</a>
+        </div>
+        """
+        let attr = NoteConverter.htmlToAttributedString(html)
+        let httpsLoc = range(of: "HTTPS", in: attr).location
+        let mailLoc = range(of: "Mail", in: attr).location
+        let fileLoc = range(of: "FileLink", in: attr).location
+        let smbLoc = range(of: "SMBLink", in: attr).location
+        let jsLoc = range(of: "JSLink", in: attr).location
+        let shortcutLoc = range(of: "Shortcut", in: attr).location
+
+        XCTAssertEqual((attr.attribute(.link, at: httpsLoc, effectiveRange: nil) as? URL)?.absoluteString, "https://example.com/path")
+        XCTAssertEqual((attr.attribute(.link, at: mailLoc, effectiveRange: nil) as? URL)?.absoluteString, "mailto:user@example.com")
+        XCTAssertNil(attr.attribute(.link, at: fileLoc, effectiveRange: nil))
+        XCTAssertNil(attr.attribute(.link, at: smbLoc, effectiveRange: nil))
+        XCTAssertNil(attr.attribute(.link, at: jsLoc, effectiveRange: nil))
+        XCTAssertNil(attr.attribute(.link, at: shortcutLoc, effectiveRange: nil))
+    }
+
+    func testSafeURLPolicyAllowlist() {
+        XCTAssertNotNil(SafeURLPolicy.validatedURL(from: "https://example.com/a?b=1"))
+        XCTAssertNotNil(SafeURLPolicy.validatedURL(from: "http://example.com"))
+        XCTAssertNotNil(SafeURLPolicy.validatedURL(from: "mailto:test@example.com"))
+        XCTAssertNil(SafeURLPolicy.validatedURL(from: "https://"))
+        XCTAssertNil(SafeURLPolicy.validatedURL(from: "file:///etc/passwd"))
+        XCTAssertNil(SafeURLPolicy.validatedURL(from: "smb://attacker/share"))
+        XCTAssertNil(SafeURLPolicy.validatedURL(from: "javascript:alert(1)"))
+        XCTAssertNil(SafeURLPolicy.validatedURL(from: "shortcuts://run-shortcut"))
+        XCTAssertNil(SafeURLPolicy.validatedURL(from: "data:text/html,hi"))
+    }
+
+    func testSinglePassHtmlEntityDecodingNoDoubleUnescape() {
+        let attr = NoteConverter.htmlToAttributedString("<div>&#38;lt;script&#38;gt; &amp;lt;</div>")
+        XCTAssertEqual(attr.string, "&lt;script&gt; &lt;")
+    }
 }

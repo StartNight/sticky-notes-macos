@@ -84,8 +84,10 @@ final class ActiveWindowTracker {
 
         var windowRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(axApp, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
-           let axWindow = windowRef {
-            return frameOf(axWindow as! AXUIElement)
+           let rawWindow = windowRef,
+           CFGetTypeID(rawWindow) == AXUIElementGetTypeID() {
+            let axWindow = rawWindow as! AXUIElement
+            return frameOf(axWindow)
         }
 
         var windowListRef: CFTypeRef?
@@ -101,15 +103,23 @@ final class ActiveWindowTracker {
         var posRef: CFTypeRef?
         var sizeRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(axWindow, kAXSizeAttribute as CFString, &sizeRef) == .success
+              AXUIElementCopyAttributeValue(axWindow, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let rawPos = posRef,
+              let rawSize = sizeRef,
+              CFGetTypeID(rawPos) == AXValueGetTypeID(),
+              CFGetTypeID(rawSize) == AXValueGetTypeID()
         else { return nil }
 
+        let posValue = rawPos as! AXValue
+        let sizeValue = rawSize as! AXValue
         var position = CGPoint.zero
         var size = CGSize.zero
-        AXValueGetValue(posRef as! AXValue, .cgPoint, &position)
-        AXValueGetValue(sizeRef as! AXValue, .cgSize, &size)
+        guard AXValueGetValue(posValue, .cgPoint, &position),
+              AXValueGetValue(sizeValue, .cgSize, &size) else {
+            return nil
+        }
 
-        let screenHeight = NSScreen.main?.frame.height ?? 900
+        let screenHeight = NSScreen.screens.first?.frame.height ?? NSScreen.main?.frame.height ?? 900
         let appKitY = screenHeight - position.y - size.height
 
         return NSRect(x: position.x, y: appKitY, width: size.width, height: size.height)

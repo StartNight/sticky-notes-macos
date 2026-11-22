@@ -147,13 +147,18 @@ final class StickyNote {
         syncStatus: SyncStatus = .pendingUpload,
         lastSyncedAt: Date? = nil
     ) {
-        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let screen: NSRect = Thread.isMainThread
+            ? (NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900))
+            : NSRect(x: 0, y: 0, width: 1440, height: 900)
         let width: Double = 300
         let height: Double = 350
-        let maxX = max(screen.origin.x, screen.origin.x + screen.width - width - 40)
-        let maxY = max(screen.origin.y, screen.origin.y + screen.height - height - 40)
-        let randX = Double.random(in: (screen.origin.x + 40)...maxX)
-        let randY = Double.random(in: (screen.origin.y + 40)...maxY)
+        let minX = screen.origin.x + 40
+        let maxX = max(minX, screen.origin.x + screen.width - width - 40)
+        let minY = screen.origin.y + 40
+        let maxY = max(minY, screen.origin.y + screen.height - height - 40)
+        let randX = Double.random(in: minX...maxX)
+        let randY = Double.random(in: minY...maxY)
+        let now = Date()
 
         self.id = UUID()
         self.plainTextContent = content
@@ -163,8 +168,8 @@ final class StickyNote {
         self.windowY = randY
         self.windowWidth = width
         self.windowHeight = height
-        self.createdAt = Date()
-        self.modifiedAt = Date()
+        self.createdAt = now
+        self.modifiedAt = now
         self.isOpen = false
         self.audioRecordings = []
 

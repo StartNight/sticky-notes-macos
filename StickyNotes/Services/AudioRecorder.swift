@@ -1,9 +1,12 @@
 import AVFoundation
 import AppKit
+import os
 
 @MainActor
 @Observable
 final class AudioRecorder: NSObject {
+    private static let logger = Logger(subsystem: "com.shenanigans.sticky-notes", category: "audio")
+
     var isRecording = false
     var isPlaying = false
     var playingIndex: Int?
@@ -38,7 +41,7 @@ final class AudioRecorder: NSObject {
                 }
             }
         } catch {
-            NSLog("AudioRecorder: failed to start — \(error.localizedDescription)")
+            Self.logger.error("Failed to start recording: \(error.localizedDescription, privacy: .private)")
         }
     }
 
@@ -55,13 +58,13 @@ final class AudioRecorder: NSObject {
         }
 
         guard let data = try? Data(contentsOf: url) else {
-            NSLog("AudioRecorder: failed to read recorded file")
+            Self.logger.error("Failed to read recorded audio file")
             return nil
         }
 
         // Validate the data is playable audio
         guard (try? AVAudioPlayer(data: data)) != nil else {
-            NSLog("AudioRecorder: recorded data is not valid audio")
+            Self.logger.error("Recorded audio data is not playable")
             return nil
         }
 
@@ -78,7 +81,7 @@ final class AudioRecorder: NSObject {
             isPlaying = true
             playingIndex = index
         } catch {
-            NSLog("AudioRecorder: playback failed — \(error.localizedDescription)")
+            Self.logger.error("Audio playback failed: \(error.localizedDescription, privacy: .private)")
         }
     }
 

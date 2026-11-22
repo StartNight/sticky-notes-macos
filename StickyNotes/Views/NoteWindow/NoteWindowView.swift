@@ -255,32 +255,45 @@ struct NoteWindowView: View {
     // MARK: - Dictation
 
     private func startLiveDictation() {
-        guard let textView = editorProxy.textView else { return }
-        let cursor = textView.selectedRange()
-        var anchor = cursor.location
-
-        if anchor > 0 {
-            let prevChar = (textView.string as NSString).substring(with: NSRange(location: anchor - 1, length: 1))
-            if prevChar != " " && prevChar != "\n" {
-                textView.insertText(" ", replacementRange: NSRange(location: anchor, length: 0))
-                anchor += 1
-            }
-        }
-
-        dictationAnchor = anchor
-        dictationLength = 0
-
-        speechRecognizer.onPartialResult = { [self] partialText in
-            guard let textView = editorProxy.textView,
-                  let anchor = dictationAnchor else { return }
-            let replaceRange = NSRange(location: anchor, length: dictationLength)
-            textView.insertText(partialText, replacementRange: replaceRange)
-            dictationLength = (partialText as NSString).length
-            textView.setSelectedRange(NSRange(location: anchor + dictationLength, length: 0))
-        }
+        guard editorProxy.textView != nil else { return }
 
         speechRecognizer.requestAuthorization { authorized in
-            if authorized { speechRecognizer.startListening() }
+            guard authorized,
+                  let textView = editorProxy.textView,
+                  textView.window != nil,
+                  let liveNote = note, !liveNote.isDeleted, !liveNote.isDeletedLocally else { return }
+
+            let nsString = textView.string as NSString
+            let cursor = textView.selectedRange()
+            var anchor = cursor.location == NSNotFound ? nsString.length : min(cursor.location, nsString.length)
+
+            if anchor > 0 && anchor <= nsString.length {
+                let prevChar = nsString.substring(with: NSRange(location: anchor - 1, length: 1))
+                if prevChar != " " && prevChar != "\n" {
+                    textView.insertText(" ", replacementRange: NSRange(location: anchor, length: 0))
+                    anchor = min(anchor + 1, (textView.string as NSString).length)
+                }
+            }
+
+            dictationAnchor = anchor
+            dictationLength = 0
+
+            speechRecognizer.onPartialResult = { partialText in
+                guard let textView = editorProxy.textView,
+                      let rawAnchor = dictationAnchor else { return }
+                let currentLen = (textView.string as NSString).length
+                let safeAnchor = min(max(0, rawAnchor), currentLen)
+                let safeLength = min(max(0, dictationLength), currentLen - safeAnchor)
+                let replaceRange = NSRange(location: safeAnchor, length: safeLength)
+                textView.insertText(partialText, replacementRange: replaceRange)
+                let insertedLen = (partialText as NSString).length
+                dictationAnchor = safeAnchor
+                dictationLength = insertedLen
+                let postLen = (textView.string as NSString).length
+                textView.setSelectedRange(NSRange(location: min(safeAnchor + insertedLen, postLen), length: 0))
+            }
+
+            speechRecognizer.startListening()
         }
     }
 

@@ -270,9 +270,9 @@ final class AuthManager: NSObject, SyncAuthProviding {
 
         do {
         // 1. Generate PKCE parameters
-        let codeVerifier = generateCodeVerifier()
+        let codeVerifier = try generateCodeVerifier()
         let codeChallenge = generateCodeChallenge(from: codeVerifier)
-        let state = UUID().uuidString
+        let state = try generateOAuthState()
 
         let authURL = try authorizationURL(state: state, challenge: codeChallenge)
 
@@ -670,10 +670,25 @@ final class AuthManager: NSObject, SyncAuthProviding {
 
     // MARK: - PKCE Utilities
 
-    private func generateCodeVerifier() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+    private func generateRandomBase64URL(byteCount: Int) throws -> String {
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard status == errSecSuccess else {
+            throw NSError(
+                domain: "AuthManager",
+                code: -15,
+                userInfo: [NSLocalizedDescriptionKey: "Unable to generate cryptographically secure random bytes (OSStatus \(status))"]
+            )
+        }
         return base64URLEncode(Data(bytes))
+    }
+
+    private func generateCodeVerifier() throws -> String {
+        try generateRandomBase64URL(byteCount: 32)
+    }
+
+    private func generateOAuthState() throws -> String {
+        try generateRandomBase64URL(byteCount: 32)
     }
 
     private func generateCodeChallenge(from verifier: String) -> String {
