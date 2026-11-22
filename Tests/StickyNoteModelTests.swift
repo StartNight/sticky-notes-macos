@@ -199,4 +199,39 @@ final class StickyNoteModelTests: XCTestCase {
         XCTAssertEqual(SyncStatus.error.rawValue, "error")
         XCTAssertEqual(SyncStatus.allCases.count, 3)
     }
+
+    func testRedactedPlainTextUsesAttributedStringIndicesEvenWhenPlainTextDiffers() throws {
+        // Simulate an attributed string whose prefix differs in length from plainTextContent (e.g. inline image U+FFFC)
+        let img = NSImage(size: NSSize(width: 4, height: 4))
+        let att = NSTextAttachment()
+        att.image = img
+        let attr = NSMutableAttributedString(attachment: att)
+        attr.append(NSAttributedString(string: " Key "))
+        let secretRange = NSRange(location: attr.length, length: 6)
+        attr.append(NSAttributedString(string: "S3CR3T", attributes: [.hiddenText: true]))
+        XCTAssertEqual(secretRange.length, 6)
+
+        let note = StickyNote(content: "Key S3CR3T") // shorter than attr.string because of U+FFFC
+        note.attributedContentData = try NSKeyedArchiver.archivedData(withRootObject: attr, requiringSecureCoding: true)
+        XCTAssertFalse(note.redactedPlainText.contains("S3CR3T"), "Secret must not leak when plainTextContent differs from attrStr.string")
+        XCTAssertFalse(note.title.contains("S3CR3T"))
+        // Search must also never match hidden text
+        let matches = NoteScopeQuery.search([note], text: "S3CR3T", in: .unlinkedLocal)
+        XCTAssertTrue(matches.isEmpty, "Search must not match hidden text")
+    }
+
+    func testSetColorPreservesErrorStatusDuringRecoveryPauseOrPendingCreate() {
+        let note = StickyNote(content: "Recovered")
+        note.recoveryPaused = true
+        note.syncStatus = .error
+        note.setColor(.green)
+        XCTAssertEqual(note.noteColor, .green)
+        XCTAssertEqual(note.syncStatus, .error, "setColor must not clear .error when recoveryPaused is true")
+
+        let note2 = StickyNote(content: "Pending create")
+        note2.pendingCreateOperationID = "op-1"
+        note2.syncStatus = .error
+        note2.addAudioRecording(Data([1, 2, 3]))
+        XCTAssertEqual(note2.syncStatus, .error, "addAudioRecording must not clear .error when pendingCreateOperationID is set")
+    }
 }

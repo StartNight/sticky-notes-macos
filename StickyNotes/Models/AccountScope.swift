@@ -14,10 +14,14 @@ enum ActiveScope: Equatable, Hashable {
     case blocked
 
     static func resolve(isAuthenticated: Bool, isAuthenticating: Bool, accountID: String?) -> ActiveScope {
-        if let id = accountID, !id.isEmpty {
-            return isAuthenticated && id != StickyNote.unlinkedOwnerMarker ? .account(id) : .blocked
+        guard !isAuthenticating else { return .blocked }
+        if let raw = accountID {
+            let id = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !id.isEmpty {
+                return isAuthenticated && id != StickyNote.unlinkedOwnerMarker ? .account(id) : .blocked
+            }
         }
-        return (isAuthenticated || isAuthenticating) ? .blocked : .unlinkedLocal
+        return isAuthenticated ? .blocked : .unlinkedLocal
     }
 
     var accountID: String? {
@@ -39,7 +43,9 @@ extension StickyNote {
     }
 
     var ownership: Ownership {
-        guard let owner = ownerAccountID, !owner.isEmpty else { return .legacyUnknown }
+        guard let raw = ownerAccountID else { return .legacyUnknown }
+        let owner = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !owner.isEmpty else { return .legacyUnknown }
         return owner == Self.unlinkedOwnerMarker ? .unlinkedLocal : .account(owner)
     }
 
@@ -54,7 +60,10 @@ extension StickyNote {
     /// Any trace of having talked to a cloud account. Such legacy data may belong to ANY account.
     var hasCloudTrace: Bool {
         remoteId != nil || changeKey != nil || webNoteJSON != nil || lastSyncedAt != nil ||
-        pendingCreateOperationID != nil || hasCorruptSyncJournal || !pendingCleanupRemoteIDs.isEmpty || hasRecoveryHistory
+        pendingCreateOperationID != nil || pendingCreateEndpoint != nil || pendingCreateStartedAt != nil ||
+        hasCorruptSyncJournal || !pendingCleanupRemoteIDs.isEmpty || hasRecoveryHistory ||
+        recoveryIsArchive || recoveryBlocksAutomaticRecreate || recoveryVersion > 0 ||
+        recoveryPendingDeleteKindRaw != nil || syncStatus == .synced
     }
 
     /// Notes are stamped with their owner at creation. Returns nil while identity is not confirmed.
@@ -79,7 +88,8 @@ enum NoteScopeQuery {
         let visible = visible(notes, in: scope)
         guard !text.isEmpty else { return visible }
         let query = text.lowercased()
-        return visible.filter { $0.plainTextContent.lowercased().contains(query) }
+        // Search against redacted text so hidden spoiler spans cannot be probed via search oracle.
+        return visible.filter { $0.redactedPlainText.lowercased().contains(query) }
     }
 
     /// Pre-isolation notes with unknown ownership (hidden everywhere, never auto-assigned).

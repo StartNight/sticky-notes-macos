@@ -7,9 +7,16 @@ struct NoteWindowView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.openWindow) private var openWindow
     @Environment(WindowManager.self) private var windowManager
+    @Environment(ActiveWindowTracker.self) private var activeWindowTracker
     @State private var note: StickyNote?
     @State private var attributedText = NSAttributedString()
     @State private var plainText = ""
+    @State private var externalSyncVersion = 0
+    @State private var hasUnsavedLocalChanges = false
+    @State private var lastLocalSaveModifiedAt: Date?
+    @State private var pendingSaveTask: Task<Void, Never>?
+    @State private var pendingFrameSaveTask: Task<Void, Never>?
+    @State private var initialWindowFrame: NSRect?
     @State private var editorProxy = TextEditorProxy()
     @State private var audioRecorder = AudioRecorder()
     @State private var speechRecognizer = SpeechRecognizer()
@@ -18,14 +25,20 @@ struct NoteWindowView: View {
     @State private var dictationLength: Int = 0
     @AppStorage("confirmBeforeDelete") private var confirmBeforeDelete = true
 
-    /// The note if it is still backed by a live SwiftData model.
-    /// Returns nil once the note has been deleted so callers can't read
-    /// properties off a tombstoned model (which would crash).
+    /// The note if it is still backed by a live, non-tombstoned SwiftData model in the active scope.
     private var liveNote: StickyNote? {
-        guard let note, !note.isDeleted, note.isVisible(in: AuthManager.shared.activeScope) else { return nil }
+        guard let note, !note.isDeleted, !note.isDeletedLocally,
+              note.isVisible(in: AuthManager.shared.activeScope) else { return nil }
         return note
     }
     @State private var loaded = false
+
+    private static var defaultTextAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.textColor
+        ]
+    }
 
     var body: some View {
         Group {
@@ -38,9 +51,15 @@ struct NoteWindowView: View {
                         speechRecognizer: speechRecognizer,
                         onDelete: { requestDelete() },
                         onAudioSaved: { data in
-                            note.addAudioRecording(data)
-                            try? modelContext.save()
-                            SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: modelContext)
+                            guard let activeNote = liveNote else { return }
+                            activeNote.addAudioRecording(data)
+                            lastLocalSaveModifiedAt = activeNote.modifiedAt
+                            do {
+                                try modelContext.save()
+                                SyncEngine.shared.scheduleDebouncedPush(for: activeNote.id, in: modelContext)
+                            } catch {
+                                SyncEngine.shared.state = .error("无法保存录音：\(error.localizedDescription)")
+                            }
                         },
                         onStartDictation: { startLiveDictation() },
                         onStopDictation: { stopLiveDictation() },
@@ -59,18 +78,31 @@ struct NoteWindowView: View {
                     NoteTextEditor(
                         attributedText: $attributedText,
                         plainText: $plainText,
+                        externalSyncVersion: externalSyncVersion,
                         backgroundColor: NSColor(note.noteColor.backgroundColor(for: colorScheme)),
                         proxy: editorProxy,
-                        onTextChange: { saveContent() }
+                        onTextChange: { scheduleLocalSave() }
                     )
 
                     AudioClipView(
                         recordings: note.audioRecordings,
                         audioRecorder: audioRecorder,
                         onDelete: { index in
-                            note.removeAudioRecording(at: index)
-                            try? modelContext.save()
-                            SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: modelContext)
+                            guard let activeNote = liveNote,
+                                  activeNote.audioRecordings.indices.contains(index) else { return }
+                            if audioRecorder.playingIndex == index {
+                                audioRecorder.stopPlayback()
+                            } else if let playing = audioRecorder.playingIndex, index < playing {
+                                audioRecorder.playingIndex = playing - 1
+                            }
+                            activeNote.removeAudioRecording(at: index)
+                            lastLocalSaveModifiedAt = activeNote.modifiedAt
+                            do {
+                                try modelContext.save()
+                                SyncEngine.shared.scheduleDebouncedPush(for: activeNote.id, in: modelContext)
+                            } catch {
+                                SyncEngine.shared.state = .error("无法保存录音更改：\(error.localizedDescription)")
+                            }
                         }
                     )
                 }
@@ -78,13 +110,16 @@ struct NoteWindowView: View {
                     WindowAccessor(
                         noteID: noteID,
                         noteColor: note.noteColor,
-                        windowFrame: NSRect(
+                        windowFrame: initialWindowFrame ?? NSRect(
                             x: note.windowX, y: note.windowY,
                             width: note.windowWidth, height: note.windowHeight
                         ),
                         onClose: {
+                            flushPendingLocalSave()
+                            flushPendingFrameSave()
+                            audioRecorder.cancelRecording()
                             audioRecorder.stopPlayback()
-                            speechRecognizer.stopListening()
+                            stopLiveDictation(saveAfterStop: false)
                             windowManager.markClosed(noteID)
                             if let note = liveNote {
                                 note.isOpen = false
@@ -92,12 +127,8 @@ struct NoteWindowView: View {
                             }
                         },
                         onFrameChanged: { frame in
-                            guard let note = liveNote else { return }
-                            note.windowX = Double(frame.origin.x)
-                            note.windowY = Double(frame.origin.y)
-                            note.windowWidth = Double(frame.size.width)
-                            note.windowHeight = Double(frame.size.height)
-                            try? modelContext.save()
+                            guard !activeWindowTracker.isRepositioning else { return }
+                            scheduleFrameSave(frame)
                         }
                     )
                 )
@@ -120,7 +151,18 @@ struct NoteWindowView: View {
         } message: {
             Text(String(localized: "This note will be permanently deleted."))
         }
-        .onAppear { loadNote() }
+        .onAppear {
+            activeWindowTracker.isEnabled = UserDefaults.standard.object(forKey: "followActiveApp") as? Bool ?? true
+            activeWindowTracker.start()
+            loadNote()
+        }
+        .onDisappear {
+            flushPendingLocalSave()
+            flushPendingFrameSave()
+            audioRecorder.cancelRecording()
+            audioRecorder.stopPlayback()
+            stopLiveDictation(saveAfterStop: false)
+        }
         .onChange(of: AuthManager.shared.activeScope) { _, newScope in
             if newScope != .blocked { loadNote() }
         }
@@ -137,33 +179,63 @@ struct NoteWindowView: View {
             syncFromModelIfExternalChange()
         }
         .onReceive(NotificationCenter.default.publisher(for: .formatBold)) { _ in
-            if editorProxy.textView?.window?.isKeyWindow == true {
+            if isNoteEditorFocusedInKeyWindow {
                 editorProxy.toggleBold()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .formatItalic)) { _ in
-            if editorProxy.textView?.window?.isKeyWindow == true {
+            if isNoteEditorFocusedInKeyWindow {
                 editorProxy.toggleItalic()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .formatUnderline)) { _ in
-            if editorProxy.textView?.window?.isKeyWindow == true {
+            if isNoteEditorFocusedInKeyWindow {
                 editorProxy.toggleUnderline()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .formatStrikethrough)) { _ in
+            if isNoteEditorFocusedInKeyWindow {
+                editorProxy.toggleStrikethrough()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .formatBulletList)) { _ in
+            if isNoteEditorFocusedInKeyWindow {
+                editorProxy.toggleBulletList()
+            }
+        }
+    }
+
+    /// True only when this note's window is key and focus is NOT inside a secondary text field (e.g. Find bar).
+    private var isNoteEditorFocusedInKeyWindow: Bool {
+        guard let tv = editorProxy.textView, let window = tv.window, window.isKeyWindow else { return false }
+        if let responder = window.firstResponder as? NSTextView, responder !== tv {
+            return false
+        }
+        return true
     }
 
     // MARK: - Data
 
     private func loadNote() {
+        // Never mark `loaded = true` while startup restore is still pending or scope is blocked,
+        // otherwise `ScopeWindowCloser` could prematurely close a valid restored note window.
+        guard !AuthManager.shared.isRestoringSession, AuthManager.shared.activeScope != .blocked else {
+            return
+        }
         let id = noteID
         let descriptor = FetchDescriptor<StickyNote>(
             predicate: #Predicate { $0.id == id }
         )
         defer { loaded = true }
         guard let found = try? modelContext.fetch(descriptor).first,
+              !found.isDeleted, !found.isDeletedLocally,
               found.isVisible(in: AuthManager.shared.activeScope) else { return }
         self.note = found
+        self.initialWindowFrame = NSRect(x: found.windowX, y: found.windowY, width: found.windowWidth, height: found.windowHeight)
+        if !found.isOpen {
+            found.isOpen = true
+            try? modelContext.save()
+        }
 
         if let data = found.attributedContentData {
             let classes = [NSAttributedString.self, NSFont.self, NSColor.self,
@@ -171,17 +243,26 @@ struct NoteWindowView: View {
             if let restored = try? NSKeyedUnarchiver.unarchivedObject(ofClasses: classes, from: data) as? NSAttributedString {
                 self.attributedText = restored
             } else {
-                self.attributedText = NSAttributedString(string: found.plainTextContent)
+                self.attributedText = NSAttributedString(string: found.plainTextContent, attributes: Self.defaultTextAttributes)
             }
         } else {
-            self.attributedText = NSAttributedString(string: found.plainTextContent)
+            self.attributedText = NSAttributedString(string: found.plainTextContent, attributes: Self.defaultTextAttributes)
         }
         self.plainText = found.plainTextContent
+        self.hasUnsavedLocalChanges = false
+        self.externalSyncVersion += 1
         windowManager.markOpened(noteID)
     }
 
     private func syncFromModelIfExternalChange() {
         guard let note = liveNote else { return }
+        // Ignore model notifications triggered by our own local save, or while local edits / IME are pending.
+        if hasUnsavedLocalChanges { return }
+        if let lastLocal = lastLocalSaveModifiedAt, note.modifiedAt == lastLocal {
+            return
+        }
+        if editorProxy.textView?.hasMarkedText() == true { return }
+
         let isPlainDifferent = note.plainTextContent != self.plainText
         var newAttributed: NSAttributedString?
         var isAttributedDifferent = false
@@ -196,7 +277,7 @@ struct NoteWindowView: View {
                 }
             }
         } else if !self.plainText.isEmpty || !self.attributedText.string.isEmpty {
-            let fallback = NSAttributedString(string: note.plainTextContent)
+            let fallback = NSAttributedString(string: note.plainTextContent, attributes: Self.defaultTextAttributes)
             if !fallback.isEqual(to: self.attributedText) {
                 isAttributedDifferent = true
                 newAttributed = fallback
@@ -208,15 +289,37 @@ struct NoteWindowView: View {
             if let newAttributed {
                 self.attributedText = newAttributed
             } else {
-                self.attributedText = NSAttributedString(string: note.plainTextContent)
+                self.attributedText = NSAttributedString(string: note.plainTextContent, attributes: Self.defaultTextAttributes)
             }
+            self.externalSyncVersion += 1
+        }
+    }
+
+    private func scheduleLocalSave() {
+        hasUnsavedLocalChanges = true
+        pendingSaveTask?.cancel()
+        pendingSaveTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            saveContent()
+        }
+    }
+
+    private func flushPendingLocalSave() {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = nil
+        if hasUnsavedLocalChanges {
+            saveContent()
         }
     }
 
     private func saveContent() {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = nil
         guard let note = liveNote else { return }
+        let safeAttr = ClickableTextView.sanitizeAttributedString(attributedText)
         guard let archivedText = try? NSKeyedArchiver.archivedData(
-            withRootObject: attributedText,
+            withRootObject: safeAttr,
             requiringSecureCoding: true
         ) else {
             SyncEngine.shared.state = .error("无法保存便笺格式；本次更改尚未同步。")
@@ -226,19 +329,25 @@ struct NoteWindowView: View {
         let previousAttributedText = note.attributedContentData
         let previousModifiedAt = note.modifiedAt
         let previousStatus = note.syncStatus
+        let now = Date()
         note.plainTextContent = plainText
         note.attributedContentData = archivedText
-        note.modifiedAt = Date()
-        note.syncStatus = .pendingUpload
+        note.modifiedAt = now
+        if !note.recoveryPaused && note.pendingCreateOperationID == nil && !note.hasCorruptSyncJournal && !note.hasCorruptRecoveryJournal {
+            note.syncStatus = .pendingUpload
+        }
+        lastLocalSaveModifiedAt = now
         do {
             try modelContext.save()
+            hasUnsavedLocalChanges = false
         } catch {
-            // Keep the user's edits in the editor state, but don't let a failed local commit
-            // become a cloud write. A later edit can retry the save.
+            // Keep the user's edits in the editor state, and keep `hasUnsavedLocalChanges = true`
+            // so a subsequent sync/color update does not overwrite the unsaved edits.
             note.plainTextContent = previousText
             note.attributedContentData = previousAttributedText
             note.modifiedAt = previousModifiedAt
             note.syncStatus = previousStatus
+            lastLocalSaveModifiedAt = nil
             SyncEngine.shared.state = .error("无法保存便笺：\(error.localizedDescription)")
             return
         }
@@ -247,27 +356,55 @@ struct NoteWindowView: View {
 
     // MARK: - Window Position
 
+    private func scheduleFrameSave(_ frame: NSRect) {
+        pendingFrameSaveTask?.cancel()
+        pendingFrameSaveTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            persistWindowFrame(frame)
+        }
+    }
+
+    private func flushPendingFrameSave() {
+        pendingFrameSaveTask?.cancel()
+        pendingFrameSaveTask = nil
+    }
+
+    private func persistWindowFrame(_ frame: NSRect) {
+        guard let note = liveNote,
+              frame.origin.x.isFinite, frame.origin.y.isFinite,
+              frame.size.width.isFinite, frame.size.height.isFinite else { return }
+        note.windowX = Double(frame.origin.x)
+        note.windowY = Double(frame.origin.y)
+        note.windowWidth = Double(frame.size.width)
+        note.windowHeight = Double(frame.size.height)
+        try? modelContext.save()
+    }
+
     private func saveWindowPosition() {
         guard let note = liveNote else { return }
         if let frame = windowManager.windowFrame(for: noteID) {
-            note.windowX = Double(frame.origin.x)
-            note.windowY = Double(frame.origin.y)
-            note.windowWidth = Double(frame.size.width)
-            note.windowHeight = Double(frame.size.height)
+            persistWindowFrame(frame)
+        } else {
+            try? modelContext.save()
         }
-        try? modelContext.save()
     }
 
     // MARK: - Dictation
 
     private func startLiveDictation() {
-        guard editorProxy.textView != nil else { return }
+        guard editorProxy.textView != nil, liveNote != nil else { return }
+        // Mutual exclusion with audio recording/playback so mic input isn't contended.
+        audioRecorder.stopPlayback()
+        if audioRecorder.isRecording {
+            audioRecorder.cancelRecording()
+        }
 
         speechRecognizer.requestAuthorization { authorized in
             guard authorized,
                   let textView = editorProxy.textView,
                   textView.window != nil,
-                  let liveNote = note, !liveNote.isDeleted, !liveNote.isDeletedLocally else { return }
+                  liveNote != nil else { return }
 
             let nsString = textView.string as NSString
             let cursor = textView.selectedRange()
@@ -303,12 +440,14 @@ struct NoteWindowView: View {
         }
     }
 
-    private func stopLiveDictation() {
+    private func stopLiveDictation(saveAfterStop: Bool = true) {
         speechRecognizer.onPartialResult = nil
         speechRecognizer.stopListening()
         dictationAnchor = nil
         dictationLength = 0
-        saveContent()
+        if saveAfterStop {
+            saveContent()
+        }
     }
 
     // MARK: - Create
@@ -317,8 +456,17 @@ struct NoteWindowView: View {
         let rawColor = UserDefaults.standard.string(forKey: "defaultColor") ?? NoteColor.yellow.rawValue
         let color = NoteColor.fromPersisted(rawColor)
         guard let newNote = StickyNote.make(in: AuthManager.shared.activeScope, color: color) else { NSSound.beep(); return }
+        newNote.isOpen = true
         modelContext.insert(newNote)
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            modelContext.delete(newNote)
+            NSSound.beep()
+            SyncEngine.shared.state = .error("无法创建便笺：\(error.localizedDescription)")
+            return
+        }
+        windowManager.markOpened(newNote.id)
         openWindow(value: newNote.id)
     }
 
@@ -333,9 +481,14 @@ struct NoteWindowView: View {
     }
 
     private func deleteNote() {
-        guard let noteToDelete = note, !noteToDelete.isDeleted, !noteToDelete.isDeletedLocally else { return }
+        guard let noteToDelete = liveNote else { return }
+        pendingSaveTask?.cancel()
+        pendingSaveTask = nil
+        hasUnsavedLocalChanges = false
+        flushPendingFrameSave()
+        audioRecorder.cancelRecording()
         audioRecorder.stopPlayback()
-        speechRecognizer.stopListening()
+        stopLiveDictation(saveAfterStop: false)
         self.note = nil
         windowManager.closeWindow(for: noteID)
         do {

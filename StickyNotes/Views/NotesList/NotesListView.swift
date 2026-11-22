@@ -33,16 +33,17 @@ struct NotesListView: View {
     }
 
     var body: some View {
+        let visibleNotes = filteredNotes
         VStack(spacing: 0) {
             header
             SearchBar(text: $searchText)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
 
-            if filteredNotes.isEmpty {
+            if visibleNotes.isEmpty {
                 emptyState
             } else {
-                notesList
+                notesList(visibleNotes)
             }
         }
         .frame(minWidth: 280, idealWidth: 320, minHeight: 400)
@@ -116,7 +117,6 @@ struct NotesListView: View {
             }
             .buttonStyle(.plain)
             .disabled(scope == .blocked)
-            .keyboardShortcut("n", modifiers: .command)
             .help(String(localized: "New Note (⌘N)"))
         }
         .padding(.horizontal, 16)
@@ -295,10 +295,10 @@ struct NotesListView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private var notesList: some View {
+    private func notesList(_ visibleNotes: [StickyNote]) -> some View {
         ScrollView {
             LazyVStack(spacing: isCollapsed ? 4 : 8) {
-                ForEach(filteredNotes) { note in
+                ForEach(visibleNotes) { note in
                     VStack(alignment: .leading, spacing: 2) {
                         if note.recoveryPaused {
                             Text(String(localized: "Recovery paused — local content only"))
@@ -327,19 +327,27 @@ struct NotesListView: View {
         let color = NoteColor.fromPersisted(rawColor)
         // Owner is stamped at creation; nothing is created while identity is unconfirmed.
         guard let note = StickyNote.make(in: scope, color: color) else { NSSound.beep(); return }
+        note.isOpen = true
         modelContext.insert(note)
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            modelContext.delete(note)
+            NSSound.beep()
+            syncEngine.state = .error("无法创建便笺：\(error.localizedDescription)")
+            return
+        }
         openNote(note)
     }
 
     private func openNote(_ note: StickyNote) {
-        if windowManager.isOpen(note.id) {
-            windowManager.bringToFront(note.id)
-        } else {
-            note.isOpen = true
-            windowManager.markOpened(note.id)
-            openWindow(value: note.id)
+        if windowManager.isOpen(note.id) && windowManager.bringToFront(note.id) {
+            return
         }
+        note.isOpen = true
+        try? modelContext.save()
+        windowManager.markOpened(note.id)
+        openWindow(value: note.id)
     }
 
     private func requestDelete(_ note: StickyNote) {

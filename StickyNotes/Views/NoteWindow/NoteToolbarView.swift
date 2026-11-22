@@ -76,7 +76,11 @@ struct NoteToolbarView: View {
             Button { onStartDictation() } label: {
                 Label(String(localized: "Dictate (Speech to Text)"), systemImage: "text.bubble")
             }
-            Button { audioRecorder.startRecording() } label: {
+            Button {
+                if speechRecognizer.isListening { onStopDictation() }
+                audioRecorder.stopPlayback()
+                audioRecorder.startRecording()
+            } label: {
                 Label(String(localized: "Record Audio Clip"), systemImage: "waveform.circle")
             }
         } label: {
@@ -125,10 +129,18 @@ struct NoteToolbarView: View {
             Divider()
 
             ColorPickerMenu(currentColor: note.noteColor) { color in
+                guard !note.isDeleted, !note.isDeletedLocally else {
+                    showNoteMenu = false
+                    return
+                }
                 note.setColor(color)
                 if let context = note.modelContext {
-                    try? context.save()
-                    SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: context)
+                    do {
+                        try context.save()
+                        SyncEngine.shared.scheduleDebouncedPush(for: note.id, in: context)
+                    } catch {
+                        SyncEngine.shared.state = .error("无法保存颜色更改：\(error.localizedDescription)")
+                    }
                 }
                 showNoteMenu = false
             }

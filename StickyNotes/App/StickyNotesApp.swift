@@ -2,6 +2,10 @@ import SwiftUI
 import SwiftData
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        AudioRecorder.cleanupOrphanTempFiles()
+    }
+
     /// Keep app alive when the notes list window is closed
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
@@ -11,6 +15,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         // Always show the list window — floating note windows don't count as "the main window"
         if let window = sender.windows.first(where: Self.isNotesListWindow) {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
             window.makeKeyAndOrderFront(nil)
             return false
         }
@@ -37,6 +44,8 @@ struct StickyNotesApp: App {
     @State private var activeWindowTracker = ActiveWindowTracker()
     @Environment(\.openWindow) private var openWindow
 
+    private static var hasRegisteredSyncObserver = false
+
     init() {
         // App-level, independent of whether the notes-list window exists: asks about no-account notes once the
         // account identity is verified (see AdoptionPromptCoordinator).
@@ -50,9 +59,12 @@ struct StickyNotesApp: App {
 
         // Handle sync requests at the App level so background periodic sync and ⌘⇧S work
         // reliably even when the notes list window is closed and only floating note windows are open.
-        NotificationCenter.default.addObserver(forName: .requestModelContextSync, object: nil, queue: .main) { _ in
-            Task { @MainActor in
-                await SyncEngine.shared.syncAll(modelContext: Self.sharedContainer.mainContext)
+        if !Self.hasRegisteredSyncObserver {
+            Self.hasRegisteredSyncObserver = true
+            NotificationCenter.default.addObserver(forName: .requestModelContextSync, object: nil, queue: .main) { _ in
+                Task { @MainActor in
+                    await SyncEngine.shared.syncAll(modelContext: Self.sharedContainer.mainContext)
+                }
             }
         }
     }
@@ -166,8 +178,16 @@ struct StickyNotesApp: App {
                     let color = NoteColor.fromPersisted(rawColor)
                     let scope = AuthManager.shared.activeScope
                     guard let note = StickyNote.make(in: scope, color: color) else { NSSound.beep(); return }
+                    note.isOpen = true
                     context.insert(note)
-                    try? context.save()
+                    do {
+                        try context.save()
+                    } catch {
+                        context.delete(note)
+                        NSSound.beep()
+                        return
+                    }
+                    windowManager.markOpened(note.id)
                     openWindow(value: note.id)
                 }
                 .keyboardShortcut("n", modifiers: .command)
@@ -188,6 +208,16 @@ struct StickyNotesApp: App {
                     NotificationCenter.default.post(name: .formatUnderline, object: nil)
                 }
                 .keyboardShortcut("u", modifiers: .command)
+
+                Button(String(localized: "Strikethrough")) {
+                    NotificationCenter.default.post(name: .formatStrikethrough, object: nil)
+                }
+                .keyboardShortcut("x", modifiers: [.command, .shift])
+
+                Button(String(localized: "Bullet List")) {
+                    NotificationCenter.default.post(name: .formatBulletList, object: nil)
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
             }
 
             CommandMenu(String(localized: "Sync")) {
@@ -202,6 +232,7 @@ struct StickyNotesApp: App {
             if let noteID {
                 NoteWindowView(noteID: noteID)
                     .environment(windowManager)
+                    .environment(activeWindowTracker)
             }
         }
         .modelContainer(Self.sharedContainer)
@@ -220,4 +251,6 @@ extension Notification.Name {
     static let formatBold = Notification.Name("formatBold")
     static let formatItalic = Notification.Name("formatItalic")
     static let formatUnderline = Notification.Name("formatUnderline")
+    static let formatStrikethrough = Notification.Name("formatStrikethrough")
+    static let formatBulletList = Notification.Name("formatBulletList")
 }

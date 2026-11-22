@@ -3,6 +3,7 @@ import SwiftUI
 struct NoteTextEditor: NSViewRepresentable {
     @Binding var attributedText: NSAttributedString
     @Binding var plainText: String
+    let externalSyncVersion: Int
     let backgroundColor: NSColor
     let proxy: TextEditorProxy
     let onTextChange: () -> Void
@@ -40,18 +41,20 @@ struct NoteTextEditor: NSViewRepresentable {
             .foregroundColor: NSColor.textColor
         ]
 
-        if !attributedText.string.isEmpty {
+        if attributedText.length > 0 {
             textView.textStorage?.setAttributedString(attributedText)
         }
 
         scrollView.documentView = textView
         context.coordinator.textView = textView
+        context.coordinator.lastAppliedExternalVersion = externalSyncVersion
         proxy.textView = textView
 
         return scrollView
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.parent = self
         guard let textView = scrollView.documentView as? NSTextView else { return }
         textView.backgroundColor = backgroundColor
 
@@ -59,20 +62,22 @@ struct NoteTextEditor: NSViewRepresentable {
             proxy.textView = textView
         }
 
-        if context.coordinator.isUpdatingFromUI { return }
+        // Only replace textStorage on genuine external updates (initial load / cloud sync),
+        // never on local keystrokes (preserves NSUndoManager, typingAttributes, images, and IME).
+        guard context.coordinator.lastAppliedExternalVersion != externalSyncVersion else { return }
+        // Never overwrite while CJK/dead-key IME composition is active.
+        if textView.hasMarkedText() { return }
 
-        let currentText = textView.attributedString()
-        if !currentText.isEqual(to: attributedText) {
-            let newLength = attributedText.length
-            let clampedRanges = textView.selectedRanges.compactMap { value -> NSValue? in
-                let range = value.rangeValue
-                let safeLocation = min(range.location, newLength)
-                let safeLength = min(range.length, max(0, newLength - safeLocation))
-                return NSValue(range: NSRange(location: safeLocation, length: safeLength))
-            }
-            textView.textStorage?.setAttributedString(attributedText)
-            textView.selectedRanges = clampedRanges.isEmpty ? [NSValue(range: NSRange(location: newLength, length: 0))] : clampedRanges
+        context.coordinator.lastAppliedExternalVersion = externalSyncVersion
+        let newLength = attributedText.length
+        let clampedRanges = textView.selectedRanges.compactMap { value -> NSValue? in
+            let range = value.rangeValue
+            let safeLocation = min(range.location, newLength)
+            let safeLength = min(range.length, max(0, newLength - safeLocation))
+            return NSValue(range: NSRange(location: safeLocation, length: safeLength))
         }
+        textView.textStorage?.setAttributedString(attributedText)
+        textView.selectedRanges = clampedRanges.isEmpty ? [NSValue(range: NSRange(location: newLength, length: 0))] : clampedRanges
     }
 
     func makeCoordinator() -> Coordinator {
@@ -80,9 +85,9 @@ struct NoteTextEditor: NSViewRepresentable {
     }
 
     class Coordinator: NSObject, NSTextViewDelegate {
-        let parent: NoteTextEditor
+        var parent: NoteTextEditor
         weak var textView: NSTextView?
-        var isUpdatingFromUI = false
+        var lastAppliedExternalVersion: Int = -1
 
         init(_ parent: NoteTextEditor) {
             self.parent = parent
@@ -90,11 +95,10 @@ struct NoteTextEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            isUpdatingFromUI = true
-            parent.attributedText = textView.attributedString()
+            // Store an immutable snapshot instead of aliasing the live mutable NSTextStorage.
+            parent.attributedText = NSAttributedString(attributedString: textView.attributedString())
             parent.plainText = textView.string
             parent.onTextChange()
-            isUpdatingFromUI = false
         }
 
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
@@ -170,15 +174,132 @@ final class ClickableTextView: NSTextView {
         super.mouseDown(with: event)
     }
 
+    /// Restrict pasteboard handling: parse pasted HTML offline (zero network/file subresource loading),
+    /// downscale oversized images, and strip unsafe link schemes and non-NSSecureCoding attributes.
+    override func paste(_ sender: Any?) {
+        let pb = NSPasteboard.general
+        if let html = pb.string(forType: .html), !html.isEmpty {
+            let safeAttr = NoteConverter.htmlToAttributedString(html)
+            insertSanitizedAttributedString(safeAttr)
+            return
+        }
+        if let rtfData = pb.data(forType: .rtf),
+           let rtfAttr = NSAttributedString(rtf: rtfData, documentAttributes: nil) {
+            insertSanitizedAttributedString(Self.sanitizeAttributedString(rtfAttr))
+            return
+        }
+        if let image = NSImage(pasteboard: pb), let resized = Self.downscaledImage(image, maxDimension: 1600) {
+            let attachment = NSTextAttachment()
+            attachment.image = resized
+            let attachStr = NSMutableAttributedString(attachment: attachment)
+            attachStr.addAttributes([
+                .font: NSFont.systemFont(ofSize: 14),
+                .foregroundColor: NSColor.textColor
+            ], range: NSRange(location: 0, length: attachStr.length))
+            insertSanitizedAttributedString(attachStr)
+            return
+        }
+        if let plain = pb.string(forType: .string) {
+            let attr = NSAttributedString(string: plain, attributes: [
+                .font: NSFont.systemFont(ofSize: 14),
+                .foregroundColor: NSColor.textColor
+            ])
+            insertSanitizedAttributedString(attr)
+            return
+        }
+        super.pasteAsPlainText(sender)
+    }
+
+    private func insertSanitizedAttributedString(_ attrStr: NSAttributedString) {
+        let range = selectedRange()
+        guard let storage = textStorage,
+              range.location != NSNotFound,
+              NSMaxRange(range) <= storage.length else { return }
+        guard shouldChangeText(in: range, replacementString: attrStr.string) else { return }
+        storage.beginEditing()
+        storage.replaceCharacters(in: range, with: attrStr)
+        storage.endEditing()
+        setSelectedRange(NSRange(location: range.location + attrStr.length, length: 0))
+        didChangeText()
+    }
+
+    static func sanitizeAttributedString(_ input: NSAttributedString) -> NSAttributedString {
+        let out = NSMutableAttributedString(string: input.string)
+        out.beginEditing()
+        defer { out.endEditing() }
+        let fullRange = NSRange(location: 0, length: input.length)
+        input.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
+            var clean: [NSAttributedString.Key: Any] = [
+                .font: (attrs[.font] as? NSFont) ?? NSFont.systemFont(ofSize: 14),
+                .foregroundColor: (attrs[.foregroundColor] as? NSColor) ?? NSColor.textColor
+            ]
+            if let underline = attrs[.underlineStyle] as? Int, underline != 0 {
+                clean[.underlineStyle] = underline
+            }
+            if let strike = attrs[.strikethroughStyle] as? Int, strike != 0 {
+                clean[.strikethroughStyle] = strike
+            }
+            if let para = attrs[.paragraphStyle] as? NSParagraphStyle {
+                clean[.paragraphStyle] = para
+            }
+            if let bg = attrs[.backgroundColor] as? NSColor {
+                clean[.backgroundColor] = bg
+            }
+            if let hidden = attrs[.hiddenText] as? Bool, hidden {
+                clean[.hiddenText] = true
+            }
+            if let linkVal = attrs[.link], let safeURL = SafeURLPolicy.validatedURL(from: linkVal) {
+                clean[.link] = safeURL
+            }
+            if let attach = attrs[.attachment] as? NSTextAttachment {
+                if let img = attach.image ?? attach.fileWrapper?.regularFileContents.flatMap(NSImage.init(data:)),
+                   let resized = downscaledImage(img, maxDimension: 1600) {
+                    let safeAttach = NSTextAttachment()
+                    safeAttach.image = resized
+                    clean[.attachment] = safeAttach
+                }
+            }
+            out.setAttributes(clean, range: range)
+        }
+        return out
+    }
+
+    private static func downscaledImage(_ image: NSImage, maxDimension: CGFloat) -> NSImage? {
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        let maxSide = max(size.width, size.height)
+        guard maxSide > maxDimension else { return image }
+        let scale = maxDimension / maxSide
+        let newSize = NSSize(width: floor(size.width * scale), height: floor(size.height * scale))
+        let target = NSImage(size: newSize)
+        target.lockFocus()
+        image.draw(in: NSRect(origin: .zero, size: newSize), from: NSRect(origin: .zero, size: size), operation: .copy, fraction: 1.0)
+        target.unlockFocus()
+        return target
+    }
+
     override func insertNewline(_ sender: Any?) {
+        if hasMarkedText() {
+            super.insertNewline(sender)
+            return
+        }
         let line = currentLineState()
+        let cursorLocation = selectedRange().location
 
         if let prefix = line.listPrefix {
             if line.isEmptyListItem {
                 exitListPrefix(on: line.range)
                 return
             }
+            let prefixEnd = line.range.location + (prefix.rawValue as NSString).length
+            guard cursorLocation != NSNotFound, cursorLocation >= prefixEnd else {
+                super.insertNewline(sender)
+                return
+            }
             super.insertNewline(sender)
+            if prefix == .todoDone {
+                resetTypingAttributesToDefault()
+            }
             insertText(prefix.continuation, replacementRange: selectedRange())
         } else if line.text.isEmpty {
             // Double-enter: previous line was already empty — clear all formatting
@@ -190,6 +311,10 @@ final class ClickableTextView: NSTextView {
     }
 
     override func insertTab(_ sender: Any?) {
+        if hasMarkedText() {
+            super.insertTab(sender)
+            return
+        }
         let line = currentLineState()
         if line.isEmptyListItem {
             exitListPrefix(on: line.range)
@@ -231,7 +356,8 @@ final class ClickableTextView: NSTextView {
 
     private func currentLineState() -> LineState {
         let nsString = string as NSString
-        let cursorLocation = selectedRange().location
+        let rawLoc = selectedRange().location
+        let cursorLocation = rawLoc == NSNotFound ? nsString.length : min(max(0, rawLoc), nsString.length)
         let range = nsString.lineRange(for: NSRange(location: cursorLocation, length: 0))
         let text = nsString.substring(with: range).trimmingCharacters(in: .newlines)
         let prefix = ListPrefix.allCases.first(where: { text.hasPrefix($0.rawValue) })
@@ -240,9 +366,12 @@ final class ClickableTextView: NSTextView {
 
     /// Replace a list-prefix line with an empty plain line, preserving the
     /// trailing newline when present so paragraphs don't collapse into each
-    /// other. Resets typing attributes so subsequent input is plain text.
+    /// other. Keeps caret on the emptied line and resets typing attributes.
     private func exitListPrefix(on lineRange: NSRange) {
-        insertText(preservedNewline(for: lineRange), replacementRange: lineRange)
+        let preserved = preservedNewline(for: lineRange)
+        insertText(preserved, replacementRange: lineRange)
+        let safeLoc = min(lineRange.location, (string as NSString).length)
+        setSelectedRange(NSRange(location: safeLoc, length: 0))
         resetTypingAttributesToDefault()
     }
 

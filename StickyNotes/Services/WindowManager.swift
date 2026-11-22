@@ -1,5 +1,4 @@
 import SwiftUI
-import SwiftData
 
 @MainActor
 @Observable
@@ -15,11 +14,23 @@ final class WindowManager {
     }
 
     func isOpen(_ id: UUID) -> Bool {
-        openNoteIDs.contains(id)
+        if !openNoteIDs.contains(id) { return false }
+        if findWindow(for: id) == nil {
+            // Reconcile stale openNoteIDs so a missed close callback never locks out reopening a note.
+            openNoteIDs.remove(id)
+            return false
+        }
+        return true
     }
 
-    func bringToFront(_ id: UUID) {
-        findWindow(for: id)?.makeKeyAndOrderFront(nil)
+    @discardableResult
+    func bringToFront(_ id: UUID) -> Bool {
+        guard let window = findWindow(for: id) else {
+            openNoteIDs.remove(id)
+            return false
+        }
+        window.makeKeyAndOrderFront(nil)
+        return true
     }
 
     func closeWindow(for id: UUID) {
@@ -33,6 +44,6 @@ final class WindowManager {
 
     private func findWindow(for id: UUID) -> NSWindow? {
         let windows = NSApplication.shared.windows
-        return windows.first { $0.identifier?.rawValue == id.uuidString }
+        return windows.first { $0.identifier?.rawValue == id.uuidString && $0.isVisible }
     }
 }

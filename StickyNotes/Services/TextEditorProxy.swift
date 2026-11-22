@@ -4,7 +4,7 @@ extension NSAttributedString.Key {
     static let hiddenText = NSAttributedString.Key("com.stickynotes.hiddenText")
 }
 
-@Observable
+@MainActor
 final class TextEditorProxy {
     weak var textView: NSTextView?
 
@@ -20,6 +20,42 @@ final class TextEditorProxy {
         return textView.selectedRange()
     }
 
+    private func clampedRange(_ range: NSRange, length: Int) -> NSRange? {
+        guard range.location != NSNotFound, range.location >= 0, range.location <= length else { return nil }
+        let safeLen = min(max(0, range.length), length - range.location)
+        return NSRange(location: range.location, length: safeLen)
+    }
+
+    /// Registers an undoable attribute-only mutation on `textView` via `shouldChangeText` / `didChangeText`.
+    private func applyAttributeEdit(in textView: NSTextView, range: NSRange, mutate: (NSTextStorage) -> Void) {
+        guard let storage = textView.textStorage,
+              let safeRange = clampedRange(range, length: storage.length),
+              safeRange.length > 0 else { return }
+        let before = storage.attributedSubstring(from: safeRange).copy() as! NSAttributedString
+        guard textView.shouldChangeText(in: safeRange, replacementString: nil) else { return }
+        storage.beginEditing()
+        mutate(storage)
+        storage.endEditing()
+        let after = storage.attributedSubstring(from: safeRange).copy() as! NSAttributedString
+        if let undoManager = textView.undoManager {
+            undoManager.registerUndo(withTarget: textView) { tv in
+                guard let st = tv.textStorage, NSMaxRange(safeRange) <= st.length else { return }
+                st.beginEditing()
+                st.replaceCharacters(in: safeRange, with: before)
+                st.endEditing()
+                tv.didChangeText()
+                tv.undoManager?.registerUndo(withTarget: tv) { tv2 in
+                    guard let st2 = tv2.textStorage, NSMaxRange(safeRange) <= st2.length else { return }
+                    st2.beginEditing()
+                    st2.replaceCharacters(in: safeRange, with: after)
+                    st2.endEditing()
+                    tv2.didChangeText()
+                }
+            }
+        }
+        textView.didChangeText()
+    }
+
     // MARK: - Font Trait Formatting (DRY: single method for B/I)
 
     func toggleBold() { toggleFontTrait(.boldFontMask, symbolicTrait: .bold) }
@@ -27,7 +63,8 @@ final class TextEditorProxy {
 
     private func toggleFontTrait(_ trait: NSFontTraitMask, symbolicTrait: NSFontDescriptor.SymbolicTraits) {
         guard let textView, let storage = textView.textStorage else { return }
-        guard let range = restoreFocusAndRange() else { return }
+        guard let rawRange = restoreFocusAndRange(),
+              let range = clampedRange(rawRange, length: storage.length) else { return }
 
         if range.length == 0 {
             var attrs = textView.typingAttributes
@@ -41,17 +78,26 @@ final class TextEditorProxy {
             return
         }
 
-        storage.beginEditing()
-        storage.enumerateAttribute(.font, in: range) { value, attrRange, _ in
-            guard let font = value as? NSFont else { return }
-            let newFont = font.fontDescriptor.symbolicTraits.contains(symbolicTrait)
-                ? NSFontManager.shared.convert(font, toNotHaveTrait: trait)
-                : NSFontManager.shared.convert(font, toHaveTrait: trait)
-            storage.addAttribute(.font, value: newFont, range: attrRange)
+        // Uniform toggle: remove trait only if ALL runs in the selection already have it; otherwise apply uniformly.
+        var allHaveTrait = true
+        storage.enumerateAttribute(.font, in: range) { value, _, stop in
+            let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: 14)
+            if !font.fontDescriptor.symbolicTraits.contains(symbolicTrait) {
+                allHaveTrait = false
+                stop.pointee = true
+            }
         }
-        storage.endEditing()
+
+        applyAttributeEdit(in: textView, range: range) { storage in
+            storage.enumerateAttribute(.font, in: range) { value, attrRange, _ in
+                let font = (value as? NSFont) ?? NSFont.systemFont(ofSize: 14)
+                let newFont = allHaveTrait
+                    ? NSFontManager.shared.convert(font, toNotHaveTrait: trait)
+                    : NSFontManager.shared.convert(font, toHaveTrait: trait)
+                storage.addAttribute(.font, value: newFont, range: attrRange)
+            }
+        }
         textView.setSelectedRange(range)
-        notifyChange(textView)
     }
 
     // MARK: - Attribute Style Formatting (DRY: single method for U/S)
@@ -61,7 +107,8 @@ final class TextEditorProxy {
 
     private func toggleAttributeStyle(_ key: NSAttributedString.Key) {
         guard let textView, let storage = textView.textStorage else { return }
-        guard let range = restoreFocusAndRange() else { return }
+        guard let rawRange = restoreFocusAndRange(),
+              let range = clampedRange(rawRange, length: storage.length) else { return }
 
         if range.length == 0 {
             var attrs = textView.typingAttributes
@@ -71,95 +118,182 @@ final class TextEditorProxy {
             return
         }
 
-        storage.beginEditing()
-        storage.enumerateAttribute(key, in: range) { value, attrRange, _ in
-            let current = (value as? Int) ?? 0
-            let newValue = current == 0 ? NSUnderlineStyle.single.rawValue : 0
-            storage.addAttribute(key, value: newValue, range: attrRange)
+        var allHaveStyle = true
+        storage.enumerateAttribute(key, in: range) { value, _, stop in
+            if ((value as? Int) ?? 0) == 0 {
+                allHaveStyle = false
+                stop.pointee = true
+            }
         }
-        storage.endEditing()
+        let targetValue = allHaveStyle ? 0 : NSUnderlineStyle.single.rawValue
+
+        applyAttributeEdit(in: textView, range: range) { storage in
+            storage.addAttribute(key, value: targetValue, range: range)
+        }
         textView.setSelectedRange(range)
-        notifyChange(textView)
     }
 
-    // MARK: - List Formatting (DRY: generic prefix toggle)
+    // MARK: - List Formatting (preserves rich formatting, hidden text, and inline attachments)
+
+    private static let allListPrefixes = ["• ", "☐ ", "☑ "]
 
     func toggleBulletList() { toggleLinePrefix(prefix: "• ", matchPrefixes: ["• "]) }
 
     func toggleTodoList() { toggleLinePrefix(prefix: "☐ ", matchPrefixes: ["☐ ", "☑ "]) }
 
     private func toggleLinePrefix(prefix: String, matchPrefixes: [String]) {
-        guard let textView, let range = restoreFocusAndRange() else { return }
+        guard let textView, let storage = textView.textStorage else { return }
+        guard let rawRange = restoreFocusAndRange(),
+              let range = clampedRange(rawRange, length: storage.length) else { return }
         let text = textView.string as NSString
         let lineRange = text.lineRange(for: range)
-        let lineText = text.substring(with: lineRange)
 
-        let lines = lineText.components(separatedBy: "\n")
-        let nonEmpty = lines.filter { !$0.isEmpty }
-
-        // Cursor on a blank line (or selection of only blank lines): insert the
-        // prefix at the caret so the user can start typing a list item.
-        if nonEmpty.isEmpty {
-            textView.insertText(prefix, replacementRange: NSRange(location: range.location, length: 0))
-            notifyChange(textView)
-            return
-        }
-
-        let allPrefixed = nonEmpty.allSatisfy { line in
-            matchPrefixes.contains(where: { line.hasPrefix($0) })
-        }
-
-        let newLines = lines.map { line -> String in
-            guard !line.isEmpty else { return line }
-            if allPrefixed {
-                for mp in matchPrefixes where line.hasPrefix(mp) {
-                    return String(line.dropFirst(mp.count))
+        // Collect individual line ranges (without trailing newline) within `lineRange`.
+        var lineRanges: [NSRange] = []
+        var cursor = lineRange.location
+        let end = NSMaxRange(lineRange)
+        if cursor == end {
+            lineRanges.append(NSRange(location: cursor, length: 0))
+        } else {
+            while cursor < end {
+                let single = text.lineRange(for: NSRange(location: cursor, length: 0))
+                var contentLen = single.length
+                if contentLen > 0 && text.substring(with: NSRange(location: single.location + contentLen - 1, length: 1)) == "\n" {
+                    contentLen -= 1
                 }
-                return line
-            } else {
-                return matchPrefixes.contains(where: { line.hasPrefix($0) }) ? line : prefix + line
+                lineRanges.append(NSRange(location: single.location, length: contentLen))
+                cursor = NSMaxRange(single)
             }
         }
 
-        textView.insertText(newLines.joined(separator: "\n"), replacementRange: lineRange)
-        notifyChange(textView)
+        let nonEmptyRanges = lineRanges.filter { $0.length > 0 }
+
+        // Cursor on a blank line (or selection of only blank lines): insert the prefix at the caret.
+        if nonEmptyRanges.isEmpty {
+            textView.insertText(prefix, replacementRange: NSRange(location: range.location, length: 0))
+            return
+        }
+
+        let allPrefixed = nonEmptyRanges.allSatisfy { r in
+            let lineStr = text.substring(with: r)
+            return matchPrefixes.contains(where: { lineStr.hasPrefix($0) })
+        }
+
+        // Apply prefix insertions/removals in reverse order so earlier offsets remain valid
+        // and rich formatting, hidden spans, and inline attachments on each line remain completely untouched.
+        textView.undoManager?.beginUndoGrouping()
+        defer { textView.undoManager?.endUndoGrouping() }
+
+        for r in nonEmptyRanges.reversed() {
+            let currentText = textView.string as NSString
+            guard r.location <= currentText.length else { continue }
+            let clampedLine = NSRange(location: r.location, length: min(r.length, currentText.length - r.location))
+            let lineStr = currentText.substring(with: clampedLine)
+
+            if allPrefixed {
+                if let matched = matchPrefixes.first(where: { lineStr.hasPrefix($0) }) {
+                    let prefixLen = (matched as NSString).length
+                    let removeRange = NSRange(location: clampedLine.location, length: min(prefixLen, clampedLine.length))
+                    if textView.shouldChangeText(in: removeRange, replacementString: "") {
+                        storage.beginEditing()
+                        storage.replaceCharacters(in: removeRange, with: "")
+                        storage.endEditing()
+                        textView.didChangeText()
+                    }
+                }
+            } else if !matchPrefixes.contains(where: { lineStr.hasPrefix($0) }) {
+                let otherPrefixes = Self.allListPrefixes.filter { !matchPrefixes.contains($0) }
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.systemFont(ofSize: 14),
+                    .foregroundColor: NSColor.textColor
+                ]
+                if let existingOther = otherPrefixes.first(where: { lineStr.hasPrefix($0) }) {
+                    let existingLen = (existingOther as NSString).length
+                    let replaceRange = NSRange(location: clampedLine.location, length: min(existingLen, clampedLine.length))
+                    if textView.shouldChangeText(in: replaceRange, replacementString: prefix) {
+                        storage.beginEditing()
+                        storage.replaceCharacters(in: replaceRange, with: NSAttributedString(string: prefix, attributes: attrs))
+                        storage.endEditing()
+                        textView.didChangeText()
+                    }
+                } else {
+                    let insertRange = NSRange(location: clampedLine.location, length: 0)
+                    if textView.shouldChangeText(in: insertRange, replacementString: prefix) {
+                        storage.beginEditing()
+                        storage.insert(NSAttributedString(string: prefix, attributes: attrs), at: clampedLine.location)
+                        storage.endEditing()
+                        textView.didChangeText()
+                    }
+                }
+            }
+        }
     }
 
-    // MARK: - Todo Toggle
+    // MARK: - Todo Toggle (preserves rich formatting, hidden text, and inline attachments)
 
     func toggleTodoAt(characterIndex: Int) {
-        guard let textView else { return }
+        guard let textView, let storage = textView.textStorage else { return }
+        guard characterIndex >= 0, characterIndex <= storage.length else { return }
         let text = textView.string as NSString
         let lineRange = text.lineRange(for: NSRange(location: characterIndex, length: 0))
         let lineText = text.substring(with: lineRange)
 
-        let newLine: String
+        let checking: Bool
+        let replacementPrefix: String
         if lineText.hasPrefix("☐ ") {
-            newLine = "☑ " + String(lineText.dropFirst(2))
+            checking = true
+            replacementPrefix = "☑ "
         } else if lineText.hasPrefix("☑ ") {
-            newLine = "☐ " + String(lineText.dropFirst(2))
+            checking = false
+            replacementPrefix = "☐ "
         } else {
             return
         }
 
-        textView.insertText(newLine, replacementRange: lineRange)
+        let prefixLen = min(2, lineRange.length)
+        let prefixRange = NSRange(location: lineRange.location, length: prefixLen)
 
-        let newLineRange = NSRange(location: lineRange.location, length: (newLine as NSString).length)
-        if newLine.hasPrefix("☑ ") {
-            textView.textStorage?.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: newLineRange)
-            textView.textStorage?.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: newLineRange)
-        } else {
-            textView.textStorage?.removeAttribute(.strikethroughStyle, range: newLineRange)
-            textView.textStorage?.addAttribute(.foregroundColor, value: NSColor.textColor, range: newLineRange)
+        textView.undoManager?.beginUndoGrouping()
+        defer { textView.undoManager?.endUndoGrouping() }
+
+        // Only replace the 2-char checkbox prefix so rich formatting, links, hidden spans, and inline images survive!
+        if textView.shouldChangeText(in: prefixRange, replacementString: replacementPrefix) {
+            storage.beginEditing()
+            storage.replaceCharacters(in: prefixRange, with: replacementPrefix)
+            storage.endEditing()
+            textView.didChangeText()
         }
-        notifyChange(textView)
+
+        let updatedText = textView.string as NSString
+        let updatedLineRange = updatedText.lineRange(for: NSRange(location: min(lineRange.location, updatedText.length), length: 0))
+        guard updatedLineRange.length > 0 else { return }
+
+        applyAttributeEdit(in: textView, range: updatedLineRange) { storage in
+            // Skip `.hiddenText` subranges when modifying foreground color so hidden spoilers are never exposed!
+            storage.enumerateAttribute(.hiddenText, in: updatedLineRange) { hiddenVal, subRange, _ in
+                let isHidden = (hiddenVal as? Bool) == true
+                if checking {
+                    storage.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: subRange)
+                    if !isHidden {
+                        storage.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: subRange)
+                    }
+                } else {
+                    storage.removeAttribute(.strikethroughStyle, range: subRange)
+                    if !isHidden {
+                        storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: subRange)
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Hidden/Spoiler Text
 
     func toggleHiddenText() {
         guard let textView, let storage = textView.textStorage else { return }
-        guard let range = restoreFocusAndRange(), range.length > 0 else { return }
+        guard let rawRange = restoreFocusAndRange(),
+              let range = clampedRange(rawRange, length: storage.length),
+              range.length > 0 else { return }
 
         var isHidden = false
         if range.location < storage.length {
@@ -169,58 +303,44 @@ final class TextEditorProxy {
             }
         }
 
-        storage.beginEditing()
-        if isHidden {
-            storage.removeAttribute(.hiddenText, range: range)
-            storage.removeAttribute(.backgroundColor, range: range)
-            storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: range)
-        } else {
-            let blockColor = NSColor(white: 0.15, alpha: 1.0)
-            storage.addAttribute(.hiddenText, value: true, range: range)
-            storage.addAttribute(.backgroundColor, value: blockColor, range: range)
-            storage.addAttribute(.foregroundColor, value: blockColor, range: range)
+        applyAttributeEdit(in: textView, range: range) { storage in
+            if isHidden {
+                storage.removeAttribute(.hiddenText, range: range)
+                storage.removeAttribute(.backgroundColor, range: range)
+                storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: range)
+            } else {
+                let blockColor = NSColor(white: 0.15, alpha: 1.0)
+                storage.addAttribute(.hiddenText, value: true, range: range)
+                storage.addAttribute(.backgroundColor, value: blockColor, range: range)
+                storage.addAttribute(.foregroundColor, value: blockColor, range: range)
+            }
         }
-        storage.endEditing()
-        textView.setSelectedRange(NSRange(location: range.location + range.length, length: 0))
-        notifyChange(textView)
+        textView.setSelectedRange(NSRange(location: min(range.location + range.length, storage.length), length: 0))
     }
 
     func revealHiddenTextAt(characterIndex: Int) {
         guard let textView, let storage = textView.textStorage else { return }
-        guard characterIndex < storage.length else { return }
+        guard characterIndex >= 0, characterIndex < storage.length else { return }
 
-        // Search a bounded range around the click point, not the entire document
-        let searchStart = max(0, characterIndex - 500)
-        let searchEnd = min(storage.length, characterIndex + 500)
-        let searchRange = NSRange(location: searchStart, length: searchEnd - searchStart)
+        var fullRange = NSRange(location: 0, length: 0)
+        let attrValue = storage.attribute(
+            .hiddenText,
+            at: characterIndex,
+            longestEffectiveRange: &fullRange,
+            in: NSRange(location: 0, length: storage.length)
+        )
+        guard (attrValue as? Bool) == true, fullRange.length > 0 else { return }
 
-        var foundRange: NSRange?
-        storage.enumerateAttribute(.hiddenText, in: searchRange) { value, attrRange, stop in
-            guard value as? Bool == true, NSLocationInRange(characterIndex, attrRange) else { return }
-            foundRange = attrRange
-            stop.pointee = true
+        applyAttributeEdit(in: textView, range: fullRange) { storage in
+            storage.removeAttribute(.hiddenText, range: fullRange)
+            storage.removeAttribute(.backgroundColor, range: fullRange)
+            storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: fullRange)
         }
-
-        guard let range = foundRange else { return }
-        storage.beginEditing()
-        storage.removeAttribute(.hiddenText, range: range)
-        storage.removeAttribute(.backgroundColor, range: range)
-        storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: range)
-        storage.endEditing()
-        notifyChange(textView)
-    }
-
-    // MARK: - Private
-
-    private func notifyChange(_ textView: NSTextView) {
-        NotificationCenter.default.post(name: NSText.didChangeNotification, object: textView)
     }
 
     // MARK: - Pasteboard
 
     func paste() { textView?.paste(nil) }
-    func copySelection() { textView?.copy(nil) }
-    func cutSelection() { textView?.cut(nil) }
 }
 
 /// Forwards system Cut/Copy/Paste/Select All into the note NSTextView.

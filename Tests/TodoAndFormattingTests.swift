@@ -84,4 +84,86 @@ final class TodoAndFormattingTests: XCTestCase {
         p.revealHiddenTextAt(characterIndex: 5)
         XCTAssertNil(tv.textStorage?.attribute(.hiddenText, at: 5, effectiveRange: nil))
     }
+
+    func testRevealHiddenTextCoversLongRunOver500Characters() {
+        let secret = String(repeating: "s", count: 800)
+        let (p, tv) = makeEditor("pre " + secret + " post")
+        tv.setSelectedRange(NSRange(location: 4, length: 800))
+        p.toggleHiddenText()
+        XCTAssertEqual(tv.textStorage?.attribute(.hiddenText, at: 4, effectiveRange: nil) as? Bool, true)
+        XCTAssertEqual(tv.textStorage?.attribute(.hiddenText, at: 803, effectiveRange: nil) as? Bool, true)
+        // Reveal near start should reveal the entire contiguous 800-char span via longestEffectiveRange
+        p.revealHiddenTextAt(characterIndex: 5)
+        XCTAssertNil(tv.textStorage?.attribute(.hiddenText, at: 4, effectiveRange: nil))
+        XCTAssertNil(tv.textStorage?.attribute(.hiddenText, at: 799, effectiveRange: nil))
+        XCTAssertNil(tv.textStorage?.attribute(.hiddenText, at: 803, effectiveRange: nil))
+    }
+
+    func testToggleTodoAndBulletPreserveInlineFormattingHiddenTextAndImages() {
+        let (p, tv) = makeEditor("")
+        let rich = NSMutableAttributedString(string: "☐ ")
+        rich.append(NSAttributedString(string: "Bold ", attributes: [.font: NSFont.boldSystemFont(ofSize: 14)]))
+        rich.append(NSAttributedString(string: "secret", attributes: [.font: NSFont.systemFont(ofSize: 14), .hiddenText: true]))
+        let img = NSImage(size: NSSize(width: 8, height: 8))
+        let att = NSTextAttachment()
+        att.image = img
+        rich.append(NSAttributedString(attachment: att))
+        tv.textStorage?.setAttributedString(rich)
+
+        // Check todo at index 0 — must keep bold, hiddenText, and image attachment intact
+        p.toggleTodoAt(characterIndex: 0)
+        XCTAssertTrue(tv.string.hasPrefix("☑ "))
+        let boldFont = tv.textStorage?.attribute(.font, at: 2, effectiveRange: nil) as? NSFont
+        XCTAssertTrue(boldFont?.fontDescriptor.symbolicTraits.contains(.bold) ?? false)
+        XCTAssertEqual(tv.textStorage?.attribute(.hiddenText, at: 7, effectiveRange: nil) as? Bool, true)
+        let lastIdx = (tv.string as NSString).length - 1
+        XCTAssertNotNil(tv.textStorage?.attribute(.attachment, at: lastIdx, effectiveRange: nil) as? NSTextAttachment)
+
+        // Toggle bullet list on same line — swaps prefix only without losing rich attributes
+        tv.setSelectedRange(NSRange(location: 0, length: 0))
+        p.toggleBulletList()
+        XCTAssertTrue(tv.string.hasPrefix("• "))
+        let boldFont2 = tv.textStorage?.attribute(.font, at: 2, effectiveRange: nil) as? NSFont
+        XCTAssertTrue(boldFont2?.fontDescriptor.symbolicTraits.contains(.bold) ?? false)
+        XCTAssertEqual(tv.textStorage?.attribute(.hiddenText, at: 7, effectiveRange: nil) as? Bool, true)
+        let lastIdx2 = (tv.string as NSString).length - 1
+        XCTAssertNotNil(tv.textStorage?.attribute(.attachment, at: lastIdx2, effectiveRange: nil) as? NSTextAttachment)
+    }
+
+    func testBoldWorksWhenTextHasNoExplicitFontAttribute() {
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
+        tv.isEditable = true
+        tv.isRichText = true
+        tv.textStorage?.setAttributedString(NSAttributedString(string: "Plain text"))
+        let p = TextEditorProxy()
+        p.textView = tv
+
+        tv.setSelectedRange(NSRange(location: 0, length: 5))
+        p.toggleBold()
+        let font = tv.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        XCTAssertTrue(font?.fontDescriptor.symbolicTraits.contains(.bold) ?? false)
+    }
+
+    func testFormattingRegistersUndoAction() {
+        final class UndoDelegate: NSObject, NSTextViewDelegate {
+            let manager = UndoManager()
+            func undoManager(for view: NSTextView) -> UndoManager? { manager }
+        }
+        let undoDelegate = UndoDelegate()
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
+        tv.isEditable = true
+        tv.isRichText = true
+        tv.allowsUndo = true
+        tv.delegate = undoDelegate
+        tv.textStorage?.setAttributedString(NSAttributedString(string: "Undo me", attributes: [.font: NSFont.systemFont(ofSize: 14)]))
+        let p = TextEditorProxy()
+        p.textView = tv
+
+        tv.setSelectedRange(NSRange(location: 0, length: 4))
+        p.toggleUnderline()
+        XCTAssertEqual(tv.textStorage?.attribute(.underlineStyle, at: 0, effectiveRange: nil) as? Int, NSUnderlineStyle.single.rawValue)
+        XCTAssertTrue(undoDelegate.manager.canUndo)
+        undoDelegate.manager.undo()
+        XCTAssertNil(tv.textStorage?.attribute(.underlineStyle, at: 0, effectiveRange: nil))
+    }
 }

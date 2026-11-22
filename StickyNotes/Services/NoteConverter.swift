@@ -17,6 +17,9 @@ struct NoteConverter {
 
     // MARK: - NSAttributedString to HTML
 
+    private static let hiddenTextKey = NSAttributedString.Key("com.stickynotes.hiddenText")
+    private static let maxExportedImageBytes = 2 * 1024 * 1024
+
     static func attributedStringToHtml(_ attrStr: NSAttributedString) -> String {
         guard attrStr.length > 0 else { return "<div></div>" }
 
@@ -25,8 +28,17 @@ struct NoteConverter {
         let fullRange = NSRange(location: 0, length: attrStr.length)
 
         attrStr.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
-            let substring = string.substring(with: range)
-            var formatted = escapeHtml(substring)
+            if let attachment = attrs[.attachment] as? NSTextAttachment {
+                if let imgTag = inlineImageTag(for: attachment) {
+                    html.append(imgTag)
+                }
+                return
+            }
+
+            let rawSubstring = string.substring(with: range).replacingOccurrences(of: "\u{FFFC}", with: "")
+            guard !rawSubstring.isEmpty else { return }
+
+            var formatted = escapeHtml(rawSubstring)
 
             // Replace line breaks with <br/>
             formatted = formatted.replacingOccurrences(of: "\n", with: "<br/>")
@@ -52,11 +64,19 @@ struct NoteConverter {
                 formatted = "<s>\(formatted)</s>"
             }
 
-            // Foreground Color
-            if let color = attrs[.foregroundColor] as? NSColor {
-                if let hex = colorToHex(color) {
-                    formatted = "<span style=\"color:\(hex);\">\(formatted)</span>"
-                }
+            // Hidden/spoiler text marker (preserved across Mac round-trips and visually masked on web)
+            let isHidden = (attrs[hiddenTextKey] as? Bool) == true
+            if isHidden {
+                formatted = "<span data-stickynotes-hidden=\"1\" style=\"background-color:#262626;color:#262626;\">\(formatted)</span>"
+            } else if let color = attrs[.foregroundColor] as? NSColor,
+                      let hex = colorToHex(color) {
+                formatted = "<span style=\"color:\(hex);\">\(formatted)</span>"
+            }
+
+            // Safe link preservation
+            if !isHidden, let linkVal = attrs[.link], let safeURL = SafeURLPolicy.validatedURL(from: linkVal) {
+                let escapedHref = escapeHtml(safeURL.absoluteString)
+                formatted = "<a href=\"\(escapedHref)\">\(formatted)</a>"
             }
 
             html.append(formatted)
@@ -64,6 +84,25 @@ struct NoteConverter {
 
         html.append("</div>")
         return html
+    }
+
+    private static func inlineImageTag(for attachment: NSTextAttachment) -> String? {
+        let image: NSImage?
+        if let direct = attachment.image {
+            image = direct
+        } else if let data = attachment.fileWrapper?.regularFileContents {
+            image = NSImage(data: data)
+        } else {
+            image = nil
+        }
+        guard let image, let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else {
+            return nil
+        }
+        let pngData = rep.representation(using: .png, properties: [:])
+        guard let data = pngData, data.count <= maxExportedImageBytes else {
+            return nil
+        }
+        return "<img src=\"data:image/png;base64,\(data.base64EncodedString())\"/>"
     }
 
     // MARK: - Plain Text Conversion
@@ -76,29 +115,8 @@ struct NoteConverter {
 
     static func extractPlainText(from html: String) -> String {
         guard !html.isEmpty else { return "" }
-        var text = html
-            .replacingOccurrences(of: "<br>", with: "\n")
-            .replacingOccurrences(of: "<br/>", with: "\n")
-            .replacingOccurrences(of: "<br />", with: "\n")
-            .replacingOccurrences(of: "</p>", with: "\n")
-            .replacingOccurrences(of: "</div>", with: "\n")
-            .replacingOccurrences(of: "</li>", with: "\n")
-
-        // Strip HTML tags using regex
-        if let regex = try? NSRegularExpression(pattern: "<[^>]+>", options: .caseInsensitive) {
-            text = regex.stringByReplacingMatches(
-                in: text,
-                options: [],
-                range: NSRange(location: 0, length: text.utf16.count),
-                withTemplate: ""
-            )
-        }
-
-        // Unescape HTML entities
-        text = unescapeHtml(text)
-
-        // Trim excessive empty lines
-        let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+        let raw = OfflineHTMLParser.parse(html).string.replacingOccurrences(of: "\u{FFFC}", with: "")
+        let lines = raw.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -433,11 +451,16 @@ struct NoteConverter {
     }
 
     private static func colorToHex(_ color: NSColor) -> String? {
-        guard let rgb = color.usingColorSpace(.sRGB) else { return nil }
-        // Don't encode standard default text colors into HTML
-        if color == NSColor.textColor || color == NSColor.labelColor {
+        // Check dynamic semantic colors BEFORE sRGB conversion so checked todos (`secondaryLabelColor`)
+        // and default text/link colors are never baked as opaque #FFFFFF/#000000 across themes.
+        if color == NSColor.textColor ||
+            color == NSColor.labelColor ||
+            color == NSColor.secondaryLabelColor ||
+            color == NSColor.tertiaryLabelColor ||
+            color == NSColor.linkColor {
             return nil
         }
+        guard let rgb = color.usingColorSpace(.sRGB), rgb.alphaComponent > 0.05 else { return nil }
         let r = Int(round(rgb.redComponent * 255))
         let g = Int(round(rgb.greenComponent * 255))
         let b = Int(round(rgb.blueComponent * 255))

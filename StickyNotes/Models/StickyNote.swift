@@ -127,43 +127,65 @@ final class StickyNote {
         set { colorRawValue = newValue.rawValue }
     }
 
-    /// Plain text with hidden ranges replaced by "•••"
-    private var redactedText: String {
-        guard let data = attributedContentData,
-              let attrStr = try? NSKeyedUnarchiver.unarchivedObject(
-                  ofClasses: [NSAttributedString.self, NSFont.self, NSColor.self,
-                              NSParagraphStyle.self, NSShadow.self, NSTextAttachment.self],
-                  from: data
-              ) as? NSAttributedString else {
-            return plainTextContent
+    @Transient private var cachedRedactedKey: Int?
+    @Transient private var cachedRedactedValue: String?
+
+    /// Plain text with hidden ranges replaced by "•••".
+    /// Ranges are applied directly to `attrStr.string` (never mismatched against `plainTextContent`)
+    /// and memoized across repeated SwiftUI card renders.
+    var redactedPlainText: String {
+        var hasher = Hasher()
+        hasher.combine(plainTextContent)
+        hasher.combine(attributedContentData)
+        let key = hasher.finalize()
+        if cachedRedactedKey == key, let cached = cachedRedactedValue {
+            return cached
         }
 
-        var result = plainTextContent
-        let hiddenKey = NSAttributedString.Key("com.stickynotes.hiddenText")
-        var hiddenRanges: [NSRange] = []
+        let computed: String
+        if let data = attributedContentData,
+           let attrStr = try? NSKeyedUnarchiver.unarchivedObject(
+               ofClasses: [NSAttributedString.self, NSFont.self, NSColor.self,
+                           NSParagraphStyle.self, NSShadow.self, NSTextAttachment.self],
+               from: data
+           ) as? NSAttributedString {
+            var result = attrStr.string
+            let hiddenKey = NSAttributedString.Key("com.stickynotes.hiddenText")
+            var hiddenRanges: [NSRange] = []
 
-        attrStr.enumerateAttribute(hiddenKey, in: NSRange(location: 0, length: attrStr.length)) { value, range, _ in
-            if value as? Bool == true {
-                hiddenRanges.append(range)
+            attrStr.enumerateAttribute(hiddenKey, in: NSRange(location: 0, length: attrStr.length)) { value, range, _ in
+                if value as? Bool == true {
+                    hiddenRanges.append(range)
+                }
             }
+
+            if hiddenRanges.isEmpty {
+                computed = plainTextContent.isEmpty ? result : plainTextContent
+            } else {
+                // Apply UTF-16 ranges directly against `attrStr.string` in reverse order so indices always match.
+                for range in hiddenRanges.reversed() {
+                    guard let swiftRange = Range(range, in: result) else { continue }
+                    result.replaceSubrange(swiftRange, with: "•••")
+                }
+                computed = result.replacingOccurrences(of: "\u{FFFC}", with: "")
+            }
+        } else {
+            computed = plainTextContent
         }
 
-        // Replace in reverse order so indices stay valid
-        for range in hiddenRanges.reversed() {
-            guard let swiftRange = Range(range, in: result) else { continue }
-            result.replaceSubrange(swiftRange, with: "•••")
-        }
-        return result
+        cachedRedactedKey = key
+        cachedRedactedValue = computed
+        return computed
     }
 
     var title: String {
-        let firstLine = redactedText.components(separatedBy: .newlines).first ?? ""
+        let firstLine = redactedPlainText.components(separatedBy: .newlines).first ?? ""
         let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
         return trimmed.isEmpty ? String(localized: "New Note") : String(trimmed.prefix(100))
     }
 
     var preview: String {
-        let lines = redactedText.components(separatedBy: .newlines)
+        let lines = redactedPlainText.components(separatedBy: .newlines)
         let remaining = lines.dropFirst().joined(separator: " ").trimmingCharacters(in: .whitespaces)
         return String(remaining.prefix(200))
     }
@@ -220,20 +242,26 @@ final class StickyNote {
         noteColor = color
         ledger.markDirty(id)
         modifiedAt = Date()
-        syncStatus = .pendingUpload
+        if !recoveryPaused && pendingCreateOperationID == nil && !hasCorruptSyncJournal && !hasCorruptRecoveryJournal {
+            syncStatus = .pendingUpload
+        }
     }
 
     func addAudioRecording(_ data: Data) {
         audioRecordings.append(data)
         modifiedAt = Date()
-        syncStatus = .pendingUpload
+        if !recoveryPaused && pendingCreateOperationID == nil && !hasCorruptSyncJournal && !hasCorruptRecoveryJournal {
+            syncStatus = .pendingUpload
+        }
     }
 
     func removeAudioRecording(at index: Int) {
         guard audioRecordings.indices.contains(index) else { return }
         audioRecordings.remove(at: index)
         modifiedAt = Date()
-        syncStatus = .pendingUpload
+        if !recoveryPaused && pendingCreateOperationID == nil && !hasCorruptSyncJournal && !hasCorruptRecoveryJournal {
+            syncStatus = .pendingUpload
+        }
     }
 
     /// List order: newest `modifiedAt` first; tombstones stay hidden.

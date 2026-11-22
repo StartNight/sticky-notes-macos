@@ -234,4 +234,76 @@ final class NoteConverterTests: XCTestCase {
         let attr = NoteConverter.htmlToAttributedString("<div>&#38;lt;script&#38;gt; &amp;lt;</div>")
         XCTAssertEqual(attr.string, "&lt;script&gt; &lt;")
     }
+
+    func testExtractPlainTextStripsStyleScriptAndHandlesUppercaseBR() {
+        let html = """
+        <STYLE>body { color: red; }</STYLE>
+        <SCRIPT>alert('x')</SCRIPT>
+        <div>Line 1<BR>Line 2</div><div><br></div><div>Line 3</div>
+        """
+        let plain = NoteConverter.extractPlainText(from: html)
+        XCTAssertFalse(plain.contains("color: red"))
+        XCTAssertFalse(plain.contains("alert"))
+        XCTAssertEqual(plain, "Line 1\nLine 2\n\nLine 3")
+    }
+
+    func testHiddenTextAndSafeLinkRoundTripThroughHtml() {
+        let attr = NSMutableAttributedString(string: "Code ")
+        attr.append(NSAttributedString(string: "9999", attributes: [
+            .font: NSFont.systemFont(ofSize: 14),
+            .hiddenText: true
+        ]))
+        attr.append(NSAttributedString(string: " see ", attributes: [.font: NSFont.systemFont(ofSize: 14)]))
+        attr.append(NSAttributedString(string: "Docs", attributes: [
+            .font: NSFont.systemFont(ofSize: 14),
+            .link: URL(string: "https://example.com/docs")!
+        ]))
+        // Unsafe link must NOT be emitted
+        attr.append(NSAttributedString(string: " bad", attributes: [
+            .font: NSFont.systemFont(ofSize: 14),
+            .link: URL(string: "file:///etc/passwd")!
+        ]))
+
+        let html = NoteConverter.attributedStringToHtml(attr)
+        XCTAssertTrue(html.contains("data-stickynotes-hidden=\"1\""))
+        XCTAssertTrue(html.contains("href=\"https://example.com/docs\""))
+        XCTAssertFalse(html.contains("file:///etc/passwd"))
+
+        let roundTripped = NoteConverter.htmlToAttributedString(html)
+        let secretLoc = range(of: "9999", in: roundTripped).location
+        XCTAssertEqual(roundTripped.attribute(.hiddenText, at: secretLoc, effectiveRange: nil) as? Bool, true)
+        let docsLoc = range(of: "Docs", in: roundTripped).location
+        XCTAssertEqual((roundTripped.attribute(.link, at: docsLoc, effectiveRange: nil) as? URL)?.absoluteString, "https://example.com/docs")
+    }
+
+    func testInlineImageAttachmentRoundTripThroughHtml() {
+        let image = NSImage(size: NSSize(width: 4, height: 4), flipped: false) { rect in
+            NSColor.red.setFill()
+            rect.fill()
+            return true
+        }
+        let att = NSTextAttachment()
+        att.image = image
+        let attr = NSMutableAttributedString(string: "Photo: ")
+        attr.append(NSAttributedString(attachment: att))
+
+        let html = NoteConverter.attributedStringToHtml(attr)
+        XCTAssertTrue(html.contains("data:image/png;base64,"), html)
+
+        let parsed = NoteConverter.htmlToAttributedString(html)
+        var foundAttachment = false
+        parsed.enumerateAttribute(.attachment, in: NSRange(location: 0, length: parsed.length)) { value, _, _ in
+            if (value as? NSTextAttachment)?.image != nil { foundAttachment = true }
+        }
+        XCTAssertTrue(foundAttachment)
+    }
+
+    func testSemanticColorsNotExportedAsHardcodedHex() {
+        let attr = NSAttributedString(string: "Done item", attributes: [
+            .font: NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ])
+        let html = NoteConverter.attributedStringToHtml(attr)
+        XCTAssertFalse(html.contains("color:#"), "Semantic secondaryLabelColor should not be baked as hardcoded hex: \(html)")
+    }
 }

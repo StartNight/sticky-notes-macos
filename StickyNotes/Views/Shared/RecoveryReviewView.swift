@@ -10,6 +10,16 @@ private struct RecoveryJSONDocument: FileDocument {
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
 }
 
+private struct PendingRecoveryConfirmation {
+    let action: RecoveryAction
+    let sourceID: UUID
+    let version: Int
+    let candidate: VerifiedRecoveryCandidate?
+    let reason: String
+    let acknowledged: Bool
+    let message: String
+}
+
 struct RecoveryReviewView: View {
     @Environment(\.dismiss) private var dismiss
     @Query private var allNotes: [StickyNote]
@@ -18,16 +28,12 @@ struct RecoveryReviewView: View {
     @State private var candidateID = ""
     @State private var kind: RecoveryRemoteKind = .graphNote
     @State private var candidate: VerifiedRecoveryCandidate?
+    @State private var candidatePlainText = ""
     @State private var reason = ""
     @State private var acknowledged = false
     @State private var busy = false
     @State private var notice: String?
-    @State private var showConfirmation = false
-    @State private var confirmationAction: RecoveryAction = .restoreLocal
-    @State private var confirmationSourceID: UUID?
-    @State private var confirmationVersion = 0
-    @State private var confirmationCandidate: VerifiedRecoveryCandidate?
-    @State private var confirmationMessage = ""
+    @State private var pendingConfirmation: PendingRecoveryConfirmation?
     @State private var exportDocument: RecoveryJSONDocument?
     @State private var showExporter = false
     private var records: [StickyNote] { engine.recoveryRecords(from: allNotes) }
@@ -39,6 +45,7 @@ struct RecoveryReviewView: View {
                 Text(String(localized: "Recovery review (including deleted notes)")).font(.headline)
                 Spacer()
                 Button(String(localized: "Done")) { dismiss() }
+                    .disabled(busy)
             }
             Text(String(localized: "Exact IDs only. No automatic similarity matching or proof of non-creation. Actions require the original account, verification, and explicit confirmation."))
                 .font(.caption).foregroundStyle(.secondary)
@@ -52,7 +59,9 @@ struct RecoveryReviewView: View {
                             if note.recoveryPendingDeleteID != nil { Text(String(localized: "Deletion awaiting verification")).font(.caption).foregroundStyle(.orange) }
                         }.tag(note.id)
                     }
-                }.frame(minWidth: 190, idealWidth: 220)
+                }
+                .disabled(busy)
+                .frame(minWidth: 190, idealWidth: 220)
                 ScrollView {
                     if let note = selected {
                         details(note).padding(8)
@@ -63,15 +72,26 @@ struct RecoveryReviewView: View {
             if let notice { Text(notice).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
         }
         .padding().frame(minWidth: 760, minHeight: 670)
-        .onChange(of: selectedID) { _, _ in candidate = nil; candidateID = ""; acknowledged = false; notice = nil }
-        .onChange(of: candidateID) { _, _ in candidate = nil }
-        .onChange(of: kind) { _, _ in candidate = nil }
-        .alert(String(localized: "Confirm recovery action"), isPresented: $showConfirmation) {
-            Button(String(localized: "Cancel"), role: .cancel) {}
+        .onChange(of: selectedID) { _, _ in
+            candidate = nil
+            candidatePlainText = ""
+            candidateID = ""
+            acknowledged = false
+            notice = nil
+            pendingConfirmation = nil
+        }
+        .onChange(of: candidateID) { _, _ in candidate = nil; candidatePlainText = "" }
+        .onChange(of: kind) { _, _ in candidate = nil; candidatePlainText = "" }
+        .alert(
+            String(localized: "Confirm recovery action"),
+            isPresented: Binding(get: { pendingConfirmation != nil }, set: { if !$0 { pendingConfirmation = nil } })
+        ) {
+            Button(String(localized: "Cancel"), role: .cancel) { pendingConfirmation = nil }
             Button(String(localized: "Confirm this exact action"), role: .destructive) { performConfirmedAction() }
-        } message: { Text(confirmationMessage) }
+        } message: { Text(pendingConfirmation?.message ?? "") }
         .fileExporter(isPresented: $showExporter, document: exportDocument, contentType: .json,
                       defaultFilename: "StickyNote-Recovery-" + (selectedID?.uuidString ?? "record")) { result in
+            exportDocument = nil
             if case .failure(let error) = result { notice = error.localizedDescription }
         }
     }
@@ -97,8 +117,10 @@ struct RecoveryReviewView: View {
             candidatePanel(note)
             TextField(String(localized: "Verification evidence / reason (no passwords or tokens)"), text: $reason)
                 .textFieldStyle(.roundedBorder)
+                .disabled(busy)
             Toggle(String(localized: "I verified the original account and exact object, accept uncertainty, and authorize only the action I confirm."), isOn: $acknowledged)
                 .font(.caption)
+                .disabled(busy)
             actions(note)
             DisclosureGroup(String(localized: "Local recovery audit (not sent as logs)")) {
                 ForEach(Array(note.recoveryAudit.enumerated()), id: \.offset) { _, entry in
@@ -117,20 +139,44 @@ struct RecoveryReviewView: View {
             Picker(String(localized: "Candidate resource type"), selection: $kind) {
                 ForEach(RecoveryRemoteKind.allCases, id: \.self) { Text($0.label).tag($0) }
             }
-            TextField(String(localized: "Exact remote ID to verify"), text: $candidateID).textFieldStyle(.roundedBorder)
+            .disabled(busy)
+            TextField(String(localized: "Exact remote ID to verify"), text: $candidateID)
+                .textFieldStyle(.roundedBorder)
+                .disabled(busy)
             Button(String(localized: "Verify ownership and preview (read only)")) {
-                run { candidate = try await engine.verifyRecoveryCandidate(note, id: candidateID, kind: kind) }
-            }.disabled(busy || candidateID.trimmingCharacters(in: .whitespaces).isEmpty)
+                let expectedSourceID = note.id
+                let expectedInputID = candidateID.trimmingCharacters(in: .whitespacesAndNewlines)
+                let expectedKind = kind
+                run {
+                    let verified = try await engine.verifyRecoveryCandidate(note, id: expectedInputID, kind: expectedKind)
+                    // Discard result if user selection or input changed while the request was in flight.
+                    guard selectedID == expectedSourceID,
+                          candidateID.trimmingCharacters(in: .whitespacesAndNewlines) == expectedInputID,
+                          kind == expectedKind else { return }
+                    candidate = verified
+                    candidatePlainText = NoteConverter.extractPlainText(from: verified.html)
+                }
+            }.disabled(busy || candidateID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             if let candidate {
                 Text(candidate.exists ? String(localized: "Verified in the original account — manual relationship confirmation still required") : String(localized: "Previously authorized deletion target is absent — review before completing local recovery"))
                     .font(.caption).foregroundStyle(.secondary)
                 Text("ID: " + candidate.id + " · changeKey: " + (candidate.changeKey ?? "—")).font(.caption).textSelection(.enabled)
-                Text(NoteConverter.extractPlainText(from: candidate.html)).lineLimit(8).textSelection(.enabled)
+                Text(candidatePlainText).lineLimit(8).textSelection(.enabled)
             }
         }
     }
     private func actions(_ note: StickyNote) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let canRetryCreate = note.recoveryPendingDeleteID == nil && (
+            note.pendingCreateOperationID != nil ||
+            note.recoveryPaused ||
+            (note.recoveryBlocksAutomaticRecreate && note.syncStatus != .synced)
+        )
+        let canAllowReplacement = note.recoveryBlocksAutomaticRecreate &&
+            note.pendingCreateOperationID == nil &&
+            note.recoveryPendingDeleteID == nil &&
+            !note.hasCorruptRecoveryJournal &&
+            !note.hasCorruptSyncJournal
+        return VStack(alignment: .leading, spacing: 8) {
             Button(String(localized: "Restore visibility as paused local content")) { request(.restoreLocal, note: note) }
             if let candidate {
                 Button(String(localized: "Associate verified object and resume (restore if deleted)")) { request(.associate, note: note) }
@@ -142,11 +188,18 @@ struct RecoveryReviewView: View {
                 }
             }
             Button(String(localized: "Explicitly create a new remote copy (duplicate risk)…")) { request(.retryCreate, note: note) }
-                .disabled(note.recoveryPendingDeleteID != nil || (note.pendingCreateOperationID == nil && !note.recoveryPaused && note.syncStatus == .synced))
+                .disabled(!canRetryCreate)
             if note.recoveryBlocksAutomaticRecreate {
                 Button(String(localized: "Allow replacement sync for this note (local setting)")) {
-                    run { try engine.allowReplacementSync(note, reason: reason, acknowledged: acknowledged) }
+                    let capturedReason = reason
+                    let capturedAck = acknowledged
+                    run {
+                        try engine.allowReplacementSync(note, reason: capturedReason, acknowledged: capturedAck)
+                        acknowledged = false
+                        notice = String(localized: "Action recorded. Review retained references and sync status; this is not proof that all cloud copies are gone.")
+                    }
                 }
+                .disabled(!canAllowReplacement)
                 Text(String(localized: "If updates to the linked object keep failing (for example without ShortNotes permission), this lets the normal create-then-delete replacement run for this note. No Microsoft write happens now."))
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -155,34 +208,61 @@ struct RecoveryReviewView: View {
         }.disabled(busy || !acknowledged || reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
     private func request(_ action: RecoveryAction, note: StickyNote) {
-        confirmationAction = action; confirmationSourceID = note.id; confirmationVersion = note.recoveryVersion
-        confirmationCandidate = candidate
         let warning: String
+        let remoteLine: String
+        let actionCandidate: VerifiedRecoveryCandidate?
         switch action {
-        case .associate: warning = String(localized: "Link this exact verified object, restore visibility, and resume later updates. Preserve local snapshots and old references. No automatic cloud merge, deletion, or recreate.")
-        case .deleteCandidate: warning = String(localized: "Delete exactly the verified remote object, then retain the source locally with sync paused. Other unknown copies are not automatically found or deleted.")
-        case .deleteRetained: warning = String(localized: "Delete only this verified retained old ID. Do not resolve any separate unknown creation by guessing.")
-        case .retryCreate: warning = String(localized: "You are authorizing a new POST in the original account. The old POST may already exist: duplicates or orphan objects are possible. Preserve old operation history and do not automatically delete old objects.")
-        case .restoreLocal: warning = String(localized: "Restore local visibility with sync paused. Keep unknown creation markers and all audit records; do not write to Microsoft.")
+        case .associate:
+            warning = String(localized: "Link this exact verified object, restore visibility, and resume later updates. Preserve local snapshots and old references. No automatic cloud merge, deletion, or recreate.")
+            remoteLine = "Remote: " + (candidate?.id ?? "—")
+            actionCandidate = candidate
+        case .deleteCandidate:
+            warning = String(localized: "Delete exactly the verified remote object, then retain the source locally with sync paused. Other unknown copies are not automatically found or deleted.")
+            remoteLine = "Remote: " + (candidate?.id ?? "—")
+            actionCandidate = candidate
+        case .deleteRetained:
+            warning = String(localized: "Delete only this verified retained old ID. Do not resolve any separate unknown creation by guessing.")
+            remoteLine = "Remote: " + (candidate?.id ?? "—")
+            actionCandidate = candidate
+        case .retryCreate:
+            warning = String(localized: "You are authorizing a new POST in the original account. The old POST may already exist: duplicates or orphan objects are possible. Preserve old operation history and do not automatically delete old objects.")
+            remoteLine = "Remote: new POST (duplicate risk)"
+            actionCandidate = nil
+        case .restoreLocal:
+            warning = String(localized: "Restore local visibility with sync paused. Keep unknown creation markers and all audit records; do not write to Microsoft.")
+            remoteLine = "Remote: none (local-only)"
+            actionCandidate = nil
         }
         let accountLine = "Account: " + (note.ownerAccountID ?? "—")
         let localLine = "Local: " + note.id.uuidString
-        let remoteLine = "Remote: " + (candidate?.id ?? "new object / no remote write")
-        confirmationMessage = [warning, accountLine, localLine, remoteLine].joined(separator: "\n")
-        showConfirmation = true
+        let message = [warning, accountLine, localLine, remoteLine].joined(separator: "\n")
+        pendingConfirmation = PendingRecoveryConfirmation(
+            action: action,
+            sourceID: note.id,
+            version: note.recoveryVersion,
+            candidate: actionCandidate,
+            reason: reason,
+            acknowledged: acknowledged,
+            message: message
+        )
     }
     private func performConfirmedAction() {
-        guard let note = records.first(where: { $0.id == confirmationSourceID }) else { return }
-        let action = confirmationAction, version = confirmationVersion, verified = confirmationCandidate
+        guard let confirmation = pendingConfirmation else { return }
+        pendingConfirmation = nil
+        guard let note = records.first(where: { $0.id == confirmation.sourceID }) else { return }
         run {
-            switch action {
-            case .restoreLocal: try await engine.restoreRecoveryLocalOnly(note, reason: reason, acknowledged: acknowledged)
-            case .retryCreate: try await engine.retryRecoveryCreate(note, expectedVersion: version, reason: reason, acknowledged: acknowledged)
+            switch confirmation.action {
+            case .restoreLocal:
+                try await engine.restoreRecoveryLocalOnly(note, reason: confirmation.reason, acknowledged: confirmation.acknowledged)
+            case .retryCreate:
+                try await engine.retryRecoveryCreate(note, expectedVersion: confirmation.version, reason: confirmation.reason, acknowledged: confirmation.acknowledged)
             default:
-                guard let verified else { return }
-                try await engine.confirmRecoveryCandidate(note, candidate: verified, action: action, reason: reason, acknowledged: acknowledged)
+                guard let verified = confirmation.candidate else { return }
+                try await engine.confirmRecoveryCandidate(note, candidate: verified, action: confirmation.action, reason: confirmation.reason, acknowledged: confirmation.acknowledged)
             }
-            candidate = nil; acknowledged = false
+            candidate = nil
+            candidatePlainText = ""
+            acknowledged = false
             notice = String(localized: "Action recorded. Review retained references and sync status; this is not proof that all cloud copies are gone.")
         }
     }
