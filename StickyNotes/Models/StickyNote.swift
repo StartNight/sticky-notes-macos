@@ -296,35 +296,96 @@ final class ColorEditLedger: @unchecked Sendable {
     private static let carryKey = "ColorEditLedger.carry.v1"
     private let defaults: UserDefaults
     private let lock = NSLock()
+    private var dirtyOrder: [String]
+    private var dirtySet: Set<String>
+    private var carryOrder: [String]
+    private var carrySet: Set<String>
 
-    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
-
-    private func read(_ key: String) -> [String] { defaults.stringArray(forKey: key) ?? [] }
-    private func write(_ list: [String], _ key: String) {
-        defaults.set(Array(list.suffix(Self.capacity)), forKey: key)
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let initialDirty = Array((defaults.stringArray(forKey: Self.dirtyKey) ?? []).suffix(Self.capacity))
+        let initialCarry = Array((defaults.stringArray(forKey: Self.carryKey) ?? []).suffix(Self.capacity))
+        self.dirtyOrder = initialDirty
+        self.dirtySet = Set(initialDirty)
+        self.carryOrder = initialCarry
+        self.carrySet = Set(initialCarry)
     }
-    private func add(_ id: UUID, to key: String, removingFrom other: String) {
+
+    private func persist(_ list: [String], _ key: String) {
+        defaults.set(list, forKey: key)
+    }
+
+    /// True LRU insertion: touching an existing ID moves it to the most-recent end so active notes are never evicted first.
+    private func addDirty(_ id: UUID) {
         lock.lock(); defer { lock.unlock() }
         let value = id.uuidString
-        var mine = read(key)
-        if !mine.contains(value) { mine.append(value); write(mine, key) }
-        var theirs = read(other)
-        if theirs.contains(value) { theirs.removeAll { $0 == value }; write(theirs, other) }
-    }
-    private func remove(_ id: UUID, from key: String) {
-        lock.lock(); defer { lock.unlock() }
-        var list = read(key)
-        if list.contains(id.uuidString) { list.removeAll { $0 == id.uuidString }; write(list, key) }
-    }
-    private func contains(_ id: UUID, _ key: String) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return read(key).contains(id.uuidString)
+        if dirtySet.contains(value) {
+            dirtyOrder.removeAll { $0 == value }
+        }
+        dirtyOrder.append(value)
+        if dirtyOrder.count > Self.capacity {
+            let overflow = dirtyOrder.count - Self.capacity
+            dirtyOrder.removeFirst(overflow)
+            dirtySet = Set(dirtyOrder)
+        } else {
+            dirtySet.insert(value)
+        }
+        persist(dirtyOrder, Self.dirtyKey)
+        if carrySet.remove(value) != nil {
+            carryOrder.removeAll { $0 == value }
+            persist(carryOrder, Self.carryKey)
+        }
     }
 
-    func isDirty(_ id: UUID) -> Bool { contains(id, Self.dirtyKey) }
-    func isCarry(_ id: UUID) -> Bool { contains(id, Self.carryKey) }
-    func markDirty(_ id: UUID) { add(id, to: Self.dirtyKey, removingFrom: Self.carryKey) }
-    func markCarry(_ id: UUID) { add(id, to: Self.carryKey, removingFrom: Self.dirtyKey) }
-    func clearDirty(_ id: UUID) { remove(id, from: Self.dirtyKey) }
-    func clearCarry(_ id: UUID) { remove(id, from: Self.carryKey) }
+    private func addCarry(_ id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        let value = id.uuidString
+        if carrySet.contains(value) {
+            carryOrder.removeAll { $0 == value }
+        }
+        carryOrder.append(value)
+        if carryOrder.count > Self.capacity {
+            let overflow = carryOrder.count - Self.capacity
+            carryOrder.removeFirst(overflow)
+            carrySet = Set(carryOrder)
+        } else {
+            carrySet.insert(value)
+        }
+        persist(carryOrder, Self.carryKey)
+        if dirtySet.remove(value) != nil {
+            dirtyOrder.removeAll { $0 == value }
+            persist(dirtyOrder, Self.dirtyKey)
+        }
+    }
+
+    func isDirty(_ id: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return dirtySet.contains(id.uuidString)
+    }
+
+    func isCarry(_ id: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return carrySet.contains(id.uuidString)
+    }
+
+    func markDirty(_ id: UUID) { addDirty(id) }
+    func markCarry(_ id: UUID) { addCarry(id) }
+
+    func clearDirty(_ id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        let value = id.uuidString
+        if dirtySet.remove(value) != nil {
+            dirtyOrder.removeAll { $0 == value }
+            persist(dirtyOrder, Self.dirtyKey)
+        }
+    }
+
+    func clearCarry(_ id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        let value = id.uuidString
+        if carrySet.remove(value) != nil {
+            carryOrder.removeAll { $0 == value }
+            persist(carryOrder, Self.carryKey)
+        }
+    }
 }

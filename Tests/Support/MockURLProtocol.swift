@@ -15,24 +15,46 @@ final class MockURLProtocol: URLProtocol {
         case failure(URLError.Code)
     }
 
-    nonisolated(unsafe) static var responseDelay: TimeInterval = 0
     private var stopped = false
-    nonisolated(unsafe) static var holdMethods: Set<String> = []
-    nonisolated(unsafe) static var holdPredicate: ((URLRequest) -> Bool)?
-    nonisolated(unsafe) static var cancellationCount = 0
-    nonisolated(unsafe) private static var held: [(MockURLProtocol, Reply)] = []
-    static var heldCount: Int { lock.lock(); defer { lock.unlock() }; return held.count }
+    static let lock = NSLock()
+
+    nonisolated(unsafe) private static var _responseDelay: TimeInterval = 0
+    nonisolated(unsafe) private static var _holdMethods: Set<String> = []
+    nonisolated(unsafe) private static var _holdPredicate: ((URLRequest) -> Bool)?
+    nonisolated(unsafe) private static var _cancellationCount = 0
+    nonisolated(unsafe) private static var _handler: ((URLRequest) -> Reply)?
+    nonisolated(unsafe) private static var _held: [(MockURLProtocol, Reply)] = []
+    nonisolated(unsafe) private static var _requests: [Recorded] = []
+
+    static var responseDelay: TimeInterval {
+        get { lock.lock(); defer { lock.unlock() }; return _responseDelay }
+        set { lock.lock(); _responseDelay = newValue; lock.unlock() }
+    }
+    static var holdMethods: Set<String> {
+        get { lock.lock(); defer { lock.unlock() }; return _holdMethods }
+        set { lock.lock(); _holdMethods = newValue; lock.unlock() }
+    }
+    static var holdPredicate: ((URLRequest) -> Bool)? {
+        get { lock.lock(); defer { lock.unlock() }; return _holdPredicate }
+        set { lock.lock(); _holdPredicate = newValue; lock.unlock() }
+    }
+    static var cancellationCount: Int {
+        get { lock.lock(); defer { lock.unlock() }; return _cancellationCount }
+        set { lock.lock(); _cancellationCount = newValue; lock.unlock() }
+    }
+    static var handler: ((URLRequest) -> Reply)? {
+        get { lock.lock(); defer { lock.unlock() }; return _handler }
+        set { lock.lock(); _handler = newValue; lock.unlock() }
+    }
+    static var heldCount: Int { lock.lock(); defer { lock.unlock() }; return _held.count }
     static func releaseNext() {
         lock.lock()
-        let next = held.isEmpty ? nil : held.removeFirst()
+        let next = _held.isEmpty ? nil : _held.removeFirst()
         lock.unlock()
         if let (instance, reply) = next {
             DispatchQueue.main.async { if !instance.stopped { instance.deliver(reply) } }
         }
     }
-    static let lock = NSLock()
-    nonisolated(unsafe) static var handler: ((URLRequest) -> Reply)?
-    nonisolated(unsafe) private static var _requests: [Recorded] = []
 
     static var requests: [Recorded] {
         lock.lock(); defer { lock.unlock() }
@@ -40,13 +62,20 @@ final class MockURLProtocol: URLProtocol {
     }
 
     static func reset() {
-        lock.lock(); _requests = []; lock.unlock()
-        handler = nil
-        responseDelay = 0
-        holdMethods = []
-        holdPredicate = nil
-        cancellationCount = 0
-        lock.lock(); held = []; lock.unlock()
+        lock.lock()
+        let dangling = _held
+        _held = []
+        _requests = []
+        _handler = nil
+        _responseDelay = 0
+        _holdMethods = []
+        _holdPredicate = nil
+        _cancellationCount = 0
+        lock.unlock()
+        // Fail any held requests left behind by a failed/early-return test so URLSession tasks never hang.
+        for (instance, _) in dangling where !instance.stopped {
+            instance.deliver(.failure(.cancelled))
+        }
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -59,16 +88,18 @@ final class MockURLProtocol: URLProtocol {
                                        url: request.url!,
                                        headers: request.allHTTPHeaderFields ?? [:],
                                        body: body))
+        let currentHandler = Self._handler
+        let delay = Self._responseDelay
         Self.lock.unlock()
 
-        let reply = Self.handler?(request) ?? .failure(.notConnectedToInternet)
+        let reply = currentHandler?(request) ?? .failure(.notConnectedToInternet)
         Self.lock.lock()
-        let shouldHold = Self.holdMethods.contains(request.httpMethod ?? "GET") || (Self.holdPredicate?(request) ?? false)
-        if shouldHold { Self.held.append((self, reply)) }
+        let shouldHold = Self._holdMethods.contains(request.httpMethod ?? "GET") || (Self._holdPredicate?(request) ?? false)
+        if shouldHold { Self._held.append((self, reply)) }
         Self.lock.unlock()
         if shouldHold { return }
-        if Self.responseDelay > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.responseDelay) { [self] in
+        if delay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
                 if !stopped { deliver(reply) }
             }
         } else { deliver(reply) }
@@ -92,7 +123,7 @@ final class MockURLProtocol: URLProtocol {
 
     override func stopLoading() {
         stopped = true
-        Self.lock.lock(); Self.cancellationCount += 1; Self.lock.unlock()
+        Self.lock.lock(); Self._cancellationCount += 1; Self.lock.unlock()
     }
 
     private static func readStream(_ stream: InputStream?) -> Data? {

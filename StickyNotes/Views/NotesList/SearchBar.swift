@@ -22,6 +22,7 @@ struct SearchBar: View {
                         .font(.system(size: 12))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "Clear search"))
             }
         }
         .padding(.horizontal, 8)

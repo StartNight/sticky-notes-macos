@@ -9,6 +9,9 @@ final class SyncEngineTests: XCTestCase {
 
     private var container: ModelContainer!
     private var ledgerSuites: [String] = []
+    private var testDefaultsSuite: String!
+    private var testDefaults: UserDefaults!
+    private var createdEngines: [SyncEngine] = []
     private var ctx: ModelContext { container.mainContext }
     nonisolated private let colorPropId = "Integer {0006200e-0000-0000-c000-000000000046} Id 0x8b00"
     nonisolated private let webNotePropId = "String {00020329-0000-0000-c000-000000000046} Name _Note"
@@ -19,14 +22,33 @@ final class SyncEngineTests: XCTestCase {
         SyncAuthStub.shared.reset()
         let schema = Schema([StickyNote.self])
         container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
+        testDefaultsSuite = "sync-engine-tests-" + UUID().uuidString
+        testDefaults = UserDefaults(suiteName: testDefaultsSuite)!
+        createdEngines = []
     }
 
     override func tearDown() async throws {
+        for engine in createdEngines { engine.cancelPendingWork() }
+        createdEngines = []
         MockURLProtocol.reset()
         URLProtocol.unregisterClass(MockURLProtocol.self)
+        if let testDefaultsSuite { UserDefaults(suiteName: testDefaultsSuite)?.removePersistentDomain(forName: testDefaultsSuite) }
         for name in ledgerSuites { UserDefaults(suiteName: name)?.removePersistentDomain(forName: name) }
         ledgerSuites = []
+        testDefaults = nil
+        testDefaultsSuite = nil
         container = nil
+    }
+
+    private func makeEngine(colorLedger: ColorEditLedger? = nil) -> SyncEngine {
+        let engine = SyncEngine(
+            authManager: SyncAuthStub.shared,
+            colorLedger: colorLedger ?? isolatedLedger(),
+            defaults: testDefaults,
+            startPeriodicSync: false
+        )
+        createdEngines.append(engine)
+        return engine
     }
 
     private func insertOwned(_ note: StickyNote) {
@@ -76,7 +98,7 @@ final class SyncEngineTests: XCTestCase {
         insertOwned(note)
         XCTAssertEqual(note.syncStatus, .pendingUpload)
 
-        try await SyncEngine(authManager: SyncAuthStub.shared).uploadNote(note, token: "t")
+        try await makeEngine().uploadNote(note, token: "t")
 
         XCTAssertEqual(note.syncStatus, .synced)
         XCTAssertEqual(note.remoteId, "R-1")
@@ -102,7 +124,7 @@ final class SyncEngineTests: XCTestCase {
         let note = StickyNote(color: .blue, content: "x", remoteId: "R-9", changeKey: "CK-OLD")
         insertOwned(note)
         let ledger = isolatedLedger(); ledger.markDirty(note.id)   // 用户在本地选过颜色 → 才会写颜色属性
-        try await SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger).uploadNote(note, token: "t")
+        try await makeEngine(colorLedger: ledger).uploadNote(note, token: "t")
         let req = try XCTUnwrap(MockURLProtocol.requests.first)
         XCTAssertEqual(req.method, "PATCH")
         XCTAssertEqual(req.url.absoluteString, "https://graph.microsoft.com/v1.0/me/notes/R-9")
@@ -117,7 +139,7 @@ final class SyncEngineTests: XCTestCase {
         MockURLProtocol.handler = { _ in .http(status: 201, json: ["id": "R-2", "changeKey": "CK"]) }
         let note = StickyNote(content: "")
         insertOwned(note)
-        try await SyncEngine(authManager: SyncAuthStub.shared).uploadNote(note, token: "t")
+        try await makeEngine().uploadNote(note, token: "t")
         let body = try XCTUnwrap(bodyJSON(try XCTUnwrap(MockURLProtocol.requests.first)))
         XCTAssertEqual(body["subject"] as? String, "New Note")
         XCTAssertEqual((body["body"] as? [String: Any])?["content"] as? String, "<div></div>")
@@ -128,7 +150,7 @@ final class SyncEngineTests: XCTestCase {
         let note = StickyNote(content: "x")
         insertOwned(note)
         do {
-            try await SyncEngine(authManager: SyncAuthStub.shared).uploadNote(note, token: "t")
+            try await makeEngine().uploadNote(note, token: "t")
             XCTFail("应抛错")
         } catch {
             XCTAssertEqual((error as NSError).code, 500)
@@ -141,7 +163,7 @@ final class SyncEngineTests: XCTestCase {
         MockURLProtocol.handler = { _ in .http(status: 401, json: [:]) }
         let note = StickyNote(content: "x")
         insertOwned(note)
-        do { try await SyncEngine(authManager: SyncAuthStub.shared).uploadNote(note, token: "t"); XCTFail("应抛错") } catch {}
+        do { try await makeEngine().uploadNote(note, token: "t"); XCTFail("应抛错") } catch {}
         XCTAssertEqual(SyncAuthStub.shared.refreshCallCount, 1, "上传 401 只应刷新一次 token")
         XCTAssertEqual(MockURLProtocol.requests.count, 2)
         XCTAssertEqual(MockURLProtocol.requests.last?.headers["Authorization"], "Bearer refreshed-token-1")
@@ -156,7 +178,7 @@ final class SyncEngineTests: XCTestCase {
         }
         let note = StickyNote(content: "x")
         insertOwned(note)
-        try await SyncEngine(authManager: SyncAuthStub.shared).uploadNote(note, token: "t")
+        try await makeEngine().uploadNote(note, token: "t")
         XCTAssertEqual(note.syncStatus, .synced)
         XCTAssertEqual(SyncAuthStub.shared.refreshCallCount, 1)
     }
@@ -172,7 +194,7 @@ final class SyncEngineTests: XCTestCase {
         let note = StickyNote(color: .blue, content: "new local text", remoteId: "R-9", changeKey: "CK-OLD")
         insertOwned(note)
         do {
-            try await SyncEngine(authManager: SyncAuthStub.shared).uploadNote(note, token: "t")
+            try await makeEngine().uploadNote(note, token: "t")
             XCTFail("正文未写回时不应视为成功")
         } catch {
             XCTAssertEqual((error as NSError).code, -3)
@@ -189,7 +211,7 @@ final class SyncEngineTests: XCTestCase {
         let note = StickyNote(content: "edited", remoteId: "R-9", changeKey: "CK-OLD")
         insertOwned(note)
         do {
-            try await SyncEngine(authManager: SyncAuthStub.shared).uploadNote(note, token: "t")
+            try await makeEngine().uploadNote(note, token: "t")
             XCTFail("空 204 不应视为已同步")
         } catch {
             XCTAssertEqual((error as NSError).code, -3)
@@ -216,7 +238,7 @@ final class SyncEngineTests: XCTestCase {
         }
         let note = StickyNote(content: "x", remoteId: "R-OLD", changeKey: "CK1")
         insertOwned(note)
-        try await SyncEngine(authManager: SyncAuthStub.shared).uploadNote(note, token: "t", retryAuthOnFailure: false)
+        try await makeEngine().uploadNote(note, token: "t", retryAuthOnFailure: false)
         XCTAssertEqual(note.syncStatus, .synced)
         XCTAssertEqual(note.remoteId, "R-NEW")
         XCTAssertEqual(note.changeKey, "CK2")
@@ -231,7 +253,7 @@ final class SyncEngineTests: XCTestCase {
     func testSyncAllDoesNotReportSyncedWhenPushFailsAfterPull() async throws {
         let note = StickyNote(content: "local edit", remoteId: "R-1", changeKey: "OLD", syncStatus: .pendingUpload)
         insertOwned(note)
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         MockURLProtocol.handler = { req in
             if req.httpMethod == "GET" {
                 return .http(status: 200, json: ["value": []])
@@ -250,7 +272,7 @@ final class SyncEngineTests: XCTestCase {
 
     func testSyncAllUnauthenticatedGoesOffline() async {
         SyncAuthStub.shared.isAuthenticated = false
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         await engine.syncAll(modelContext: ctx)
         XCTAssertEqual(engine.state, .offline)
         XCTAssertTrue(MockURLProtocol.requests.isEmpty)
@@ -267,7 +289,7 @@ final class SyncEngineTests: XCTestCase {
         insertOwned(local)
         try ctx.save()
 
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         await engine.syncAll(modelContext: ctx)
 
         XCTAssertEqual(engine.state, .idle)
@@ -290,7 +312,7 @@ final class SyncEngineTests: XCTestCase {
         MockURLProtocol.handler = { _ in .failure(.notConnectedToInternet) }
         let note = StickyNote(content: "offline edit")
         insertOwned(note)
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         await engine.syncAll(modelContext: ctx)
         if case .error = engine.state {} else { XCTFail("断网应进入 error 状态，实际 \(engine.state)") }
         XCTAssertEqual(note.syncStatus, .pendingUpload, "断网时本地改动应保留为待上传")
@@ -299,7 +321,7 @@ final class SyncEngineTests: XCTestCase {
     func testRecoveryAfterNetworkRestored() async throws {
         let note = StickyNote(content: "edit")
         insertOwned(note)
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         MockURLProtocol.handler = { _ in .failure(.notConnectedToInternet) }
         await engine.syncAll(modelContext: ctx)
         XCTAssertEqual(note.syncStatus, .pendingUpload)
@@ -314,7 +336,7 @@ final class SyncEngineTests: XCTestCase {
     func testPushFailureMarksErrorAndErrorNotesAreRetriedNextSync() async throws {
         let note = StickyNote(content: "x", remoteId: "known-id", changeKey: "old")
         insertOwned(note)
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         MockURLProtocol.handler = { req in
             req.httpMethod == "GET" ? .http(status: 200, json: ["value": []]) : .failure(.timedOut)
         }
@@ -331,7 +353,7 @@ final class SyncEngineTests: XCTestCase {
     func testPull401RetryIsBounded() async {
         MockURLProtocol.handler = { _ in .http(status: 401, json: [:]) }
         SyncAuthStub.shared.maxRefreshesBeforeThrow = 10
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         await engine.syncAll(modelContext: ctx)
         print("QA_METRIC pull401RefreshCalls=\(SyncAuthStub.shared.refreshCallCount) requests=\(MockURLProtocol.requests.count)")
         XCTAssertLessThanOrEqual(SyncAuthStub.shared.refreshCallCount, 1,
@@ -349,7 +371,7 @@ final class SyncEngineTests: XCTestCase {
             }
             return .http(status: 201, json: ["id": "R-COPY", "changeKey": "K"])
         }
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         await engine.syncAll(modelContext: ctx)
         let all = try ctx.fetch(FetchDescriptor<StickyNote>())
         XCTAssertEqual(all.count, 2, "冲突时应保留本地副本")
@@ -366,7 +388,7 @@ final class SyncEngineTests: XCTestCase {
         MockURLProtocol.handler = { req in
             .http(status: 200, json: ["value": [self.message(id: "R-COL", changeKey: "K2", html: "<div>same</div>", color: 4)]])
         }
-        await SyncEngine(authManager: SyncAuthStub.shared).syncAll(modelContext: ctx)
+        await makeEngine().syncAll(modelContext: ctx)
         XCTAssertEqual(local.changeKey, "K2")
         XCTAssertEqual(local.noteColor, .blue, "云端改为蓝色(4)，本地仍为 \(local.noteColor)")
     }
@@ -374,7 +396,7 @@ final class SyncEngineTests: XCTestCase {
     /// 删除后若远端删除失败（断网），下次拉取不应“复活”已删除便签。
     func testDeletedNoteNotResurrectedAfterOfflineDelete() async throws {
         MockURLProtocol.handler = { _ in .failure(.notConnectedToInternet) }
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         engine.deleteRemoteNote(remoteId: "R-DEL", ownerAccountID: "test-account")
         try await Task.sleep(nanoseconds: 500_000_000)
         XCTAssertEqual(MockURLProtocol.requests.filter { $0.method == "DELETE" }.count, 1)
@@ -390,7 +412,7 @@ final class SyncEngineTests: XCTestCase {
     /// 远端 DELETE 返回非 2xx 时应有错误反馈或重试（当前代码忽略响应码）。
     func testDeleteRemoteHttpErrorIsNotSilentlyIgnored() async throws {
         MockURLProtocol.handler = { _ in .http(status: 500, json: [:]) }
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         engine.deleteRemoteNote(remoteId: "R-X", ownerAccountID: "test-account")
         try await Task.sleep(nanoseconds: 500_000_000)
         XCTAssertEqual(MockURLProtocol.requests.count, 1)
@@ -406,7 +428,7 @@ final class SyncEngineTests: XCTestCase {
         let note = StickyNote(content: "typing")
         insertOwned(note)
         try ctx.save()
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         for _ in 0..<5 {
             engine.scheduleDebouncedPush(for: note.id, in: ctx)
             try await Task.sleep(nanoseconds: 200_000_000)
@@ -421,7 +443,7 @@ final class SyncEngineTests: XCTestCase {
         SyncAuthStub.shared.isAuthenticated = false
         let note = StickyNote(content: "x")
         insertOwned(note)
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         engine.scheduleDebouncedPush(for: note.id, in: ctx)
         try await Task.sleep(nanoseconds: 2_000_000_000)
         XCTAssertTrue(MockURLProtocol.requests.isEmpty)
@@ -433,7 +455,7 @@ final class SyncEngineTests: XCTestCase {
         let note = StickyNote(content: "x")
         insertOwned(note)
         try ctx.save()
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         engine.scheduleDebouncedPush(for: note.id, in: ctx)
         try await Task.sleep(nanoseconds: 2_500_000_000)
         XCTAssertEqual(note.syncStatus, .error)
@@ -444,7 +466,7 @@ final class SyncEngineTests: XCTestCase {
 
     func testPullRequestOrdersByLastModifiedDateTimeDescending() async {
         MockURLProtocol.handler = { _ in .http(status: 200, json: ["value": []]) }
-        await SyncEngine(authManager: SyncAuthStub.shared).syncAll(modelContext: ctx)
+        await makeEngine().syncAll(modelContext: ctx)
         let get = try! XCTUnwrap(MockURLProtocol.requests.first)
         XCTAssertTrue(get.url.absoluteString.contains("orderby=lastModifiedDateTime"), "拉取应按 lastModifiedDateTime 降序请求")
     }
@@ -471,7 +493,7 @@ final class SyncEngineTests: XCTestCase {
                 self.message(id: "R-NEW", changeKey: "CK-REMOTE", html: "<div>just created</div>", color: 3, modified: "0001-01-01T00:00:00Z")
             ]])
         }
-        await SyncEngine(authManager: SyncAuthStub.shared).syncAll(modelContext: ctx)
+        await makeEngine().syncAll(modelContext: ctx)
         XCTAssertEqual(note.changeKey, "CK-REMOTE")
         XCTAssertEqual(note.plainTextContent, "just created")
         XCTAssertGreaterThan(note.modifiedAt, older.modifiedAt, "无效/默认的远端时间戳不得把本地新建便签沉底")
@@ -487,7 +509,7 @@ final class SyncEngineTests: XCTestCase {
                 self.message(id: "R-NEW", changeKey: "3", html: "<div>new</div>", color: 3, modified: "2026-11-01T00:00:00Z")
             ]])
         }
-        await SyncEngine(authManager: SyncAuthStub.shared).syncAll(modelContext: ctx)
+        await makeEngine().syncAll(modelContext: ctx)
         let ranked = StickyNote.visibleNewestFirst(try ctx.fetch(FetchDescriptor<StickyNote>()))
         XCTAssertEqual(ranked.map(\.remoteId), ["R-NEW", "R-MID", "R-OLD"])
     }
@@ -511,7 +533,7 @@ final class SyncEngineTests: XCTestCase {
         let note = StickyNote(content: "fresh")
         note.modifiedAt = Date()
         insertOwned(note)
-        try await SyncEngine(authManager: SyncAuthStub.shared).uploadNote(note, token: "t", retryAuthOnFailure: false)
+        try await makeEngine().uploadNote(note, token: "t", retryAuthOnFailure: false)
         XCTAssertEqual(note.syncStatus, .synced)
         XCTAssertEqual(note.remoteId, "R-MAIL")
         let post = try XCTUnwrap(MockURLProtocol.requests.last)
@@ -541,7 +563,7 @@ final class SyncEngineTests: XCTestCase {
             }
             let note = StickyNote(color: color, content: "swatch")
             insertOwned(note)
-            try await SyncEngine(authManager: SyncAuthStub.shared).uploadNote(note, token: "t")
+            try await makeEngine().uploadNote(note, token: "t")
             let req = try XCTUnwrap(MockURLProtocol.requests.first)
             XCTAssertEqual(req.method, "POST")
             let props = try XCTUnwrap(self.bodyJSON(req)?["singleValueExtendedProperties"] as? [[String: Any]])
@@ -568,7 +590,7 @@ final class SyncEngineTests: XCTestCase {
                 ]]
             ])
         }
-        await SyncEngine(authManager: SyncAuthStub.shared).syncAll(modelContext: ctx)
+        await makeEngine().syncAll(modelContext: ctx)
         let notes = ((try? ctx.fetch(FetchDescriptor<StickyNote>())) ?? [])
         let remote = try XCTUnwrap(notes.first { $0.remoteId == "R-WEB" })
         XCTAssertEqual(remote.noteColor, .charcoal, "网页 _Note.color=6 应覆盖 0x8B00=0")
@@ -586,7 +608,7 @@ final class SyncEngineTests: XCTestCase {
         note.webNoteJSON = "{\"schemaVersion\":\"beta\",\"document\":{\"type\":\"document\"},\"color\":0}"
         insertOwned(note)
         let ledger = isolatedLedger(); ledger.markDirty(note.id)
-        try await SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger).uploadNote(note, token: "t")
+        try await makeEngine(colorLedger: ledger).uploadNote(note, token: "t")
         let req = try XCTUnwrap(MockURLProtocol.requests.first { $0.method == "PATCH" })
         let props = try XCTUnwrap(self.bodyJSON(req)?["singleValueExtendedProperties"] as? [[String: Any]])
         try self.assertWebNoteColor(props, expected: 3)
@@ -606,7 +628,7 @@ final class SyncEngineTests: XCTestCase {
 
     // MARK: Account isolation
     func testOtherAccountAndUnownedUploadsAreRejectedBeforeNetwork() async throws {
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         for owner in ["other-account", nil] as [String?] {
             let note = StickyNote(content: "private", remoteId: "same-remote-id", ownerAccountID: owner)
             note.webNoteJSON = "{\"document\":\"private\"}"
@@ -625,7 +647,7 @@ final class SyncEngineTests: XCTestCase {
         let legacy = StickyNote(content: "legacy-private", remoteId: "collision", syncStatus: .pendingUpload)
         ctx.insert(a); ctx.insert(legacy)
         MockURLProtocol.handler = { _ in .http(status: 200, json: ["value": [self.message(id: "collision", changeKey: "B-key", html: "<div>B-cloud</div>", color: 1)]]) }
-        await SyncEngine(authManager: SyncAuthStub.shared).syncAll(modelContext: ctx)
+        await makeEngine().syncAll(modelContext: ctx)
         XCTAssertEqual(a.plainTextContent, "A-private")
         XCTAssertEqual(legacy.plainTextContent, "legacy-private")
         let all = try ctx.fetch(FetchDescriptor<StickyNote>())
@@ -635,7 +657,7 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testTombstoneAndQueuedDeleteFromAAreNotSentToB() async throws {
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         MockURLProtocol.handler = { _ in .failure(.notConnectedToInternet) }
         engine.deleteRemoteNote(remoteId: "A-delete", ownerAccountID: "test-account")
         try await Task.sleep(nanoseconds: 50_000_000)
@@ -653,7 +675,7 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testForeignAndUnknownImmediateDeleteNeverRequestsRemote() async throws {
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         engine.deleteRemoteNote(remoteId: "A-delete", ownerAccountID: "A")
         engine.deleteRemoteNote(remoteId: "legacy-delete", ownerAccountID: nil)
         try await Task.sleep(nanoseconds: 30_000_000)
@@ -665,7 +687,7 @@ final class SyncEngineTests: XCTestCase {
         ctx.insert(note)
         MockURLProtocol.responseDelay = 0.15
         MockURLProtocol.handler = { _ in .http(status: 200, json: ["value": [self.message(id: "A-cloud", changeKey: "K", html: "<div>A-cloud</div>", color: 1)]]) }
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         let task = Task { await engine.syncAll(modelContext: ctx) }
         for _ in 0..<100 {
             if !MockURLProtocol.requests.isEmpty { break }
@@ -685,7 +707,7 @@ final class SyncEngineTests: XCTestCase {
         ctx.insert(note)
         MockURLProtocol.responseDelay = 0.15
         MockURLProtocol.handler = { _ in .http(status: 403, json: [:]) }
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         let task = Task { try await engine.uploadNote(note, token: "fake-A") }
         for _ in 0..<100 {
             if !MockURLProtocol.requests.isEmpty { break }
@@ -702,7 +724,7 @@ final class SyncEngineTests: XCTestCase {
     func testOldDebounceCannotUseNewAccountSession() async throws {
         let note = StickyNote(content: "A-edit", ownerAccountID: "test-account")
         ctx.insert(note)
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         engine.scheduleDebouncedPush(for: note.id, in: ctx)
         SyncAuthStub.shared.accountID = "B"
         SyncAuthStub.shared.sessionGeneration = UUID()
@@ -712,7 +734,7 @@ final class SyncEngineTests: XCTestCase {
     }
 
     func testLastSyncTimestampIsAccountScoped() {
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         SyncAuthStub.shared.accountID = UUID().uuidString
         engine.lastSyncDate = Date(timeIntervalSince1970: 1234)
         SyncAuthStub.shared.accountID = UUID().uuidString
@@ -740,7 +762,7 @@ final class SyncEngineTests: XCTestCase {
         note.webNoteJSON = "{\"color\":5,\"document\":{}}"
         insertOwned(note)
         let ledger = isolatedLedger()
-        try await SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger).uploadNote(note, token: "t")
+        try await makeEngine(colorLedger: ledger).uploadNote(note, token: "t")
         let req = try XCTUnwrap(MockURLProtocol.requests.first)
         XCTAssertEqual(req.method, "PATCH")
         XCTAssertNil(bodyJSON(req)?["singleValueExtendedProperties"], "没改过颜色：PATCH 里一个颜色属性都不能有（_Note 和 0x8B00 都不写）")
@@ -755,7 +777,7 @@ final class SyncEngineTests: XCTestCase {
         let ledger = isolatedLedger()
         note.setColor(.pink, ledger: ledger)
         XCTAssertTrue(ledger.isDirty(note.id))
-        let engine = SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger)
+        let engine = makeEngine(colorLedger: ledger)
         try await engine.uploadNote(note, token: "t")
         let props = colourProps(bodyJSON(try XCTUnwrap(MockURLProtocol.requests.first)))
         XCTAssertEqual(propValue(props, id: colorPropId), "2", "pink → 0x8B00=2")
@@ -782,7 +804,7 @@ final class SyncEngineTests: XCTestCase {
             }
             return .http(status: 200, json: ["id": "R-LID", "changeKey": "K2", "body": ["content": "<div>new text</div>"]])
         }
-        let engine = SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger)
+        let engine = makeEngine(colorLedger: ledger)
         await engine.syncAll(modelContext: ctx)
         let note = try XCTUnwrap(try ctx.fetch(FetchDescriptor<StickyNote>()).first { $0.remoteId == "R-LID" })
         XCTAssertEqual(note.noteColor, .blue, "解码策略本轮不变：只有 0x8B00=0 时仍解成蓝")
@@ -813,7 +835,7 @@ final class SyncEngineTests: XCTestCase {
         let note = StickyNote(color: .yellow, content: "x", remoteId: "R-OLD", changeKey: "CK1")   // 本地"黄"可能是误解码
         insertOwned(note)
         let ledger = isolatedLedger()
-        try await SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger).uploadNote(note, token: "t", retryAuthOnFailure: false)
+        try await makeEngine(colorLedger: ledger).uploadNote(note, token: "t", retryAuthOnFailure: false)
         XCTAssertEqual(MockURLProtocol.requests.map(\.method), ["PATCH", "GET", "POST", "DELETE"])
         let get = MockURLProtocol.requests[1]
         XCTAssertTrue(get.url.absoluteString.contains("0x8b00") && get.url.absoluteString.contains("_Note"), "只读取两个颜色属性")
@@ -839,7 +861,7 @@ final class SyncEngineTests: XCTestCase {
         let note = StickyNote(color: .green, content: "x", remoteId: "R-OLD", changeKey: "CK1")
         note.webNoteJSON = "{\"color\":1}"
         insertOwned(note)
-        try await SyncEngine(authManager: SyncAuthStub.shared, colorLedger: isolatedLedger()).uploadNote(note, token: "t", retryAuthOnFailure: false)
+        try await makeEngine(colorLedger: isolatedLedger()).uploadNote(note, token: "t", retryAuthOnFailure: false)
         let post = try XCTUnwrap(MockURLProtocol.requests.first { $0.method == "POST" })
         XCTAssertTrue(colourOnly(colourProps(bodyJSON(post))).isEmpty, "云端本来没有颜色 → 新对象也不写颜色")
         XCTAssertTrue(colourProps(bodyJSON(post)).contains { ($0["value"] as? String) == "IPM.StickyNote" })
@@ -859,7 +881,7 @@ final class SyncEngineTests: XCTestCase {
             let note = StickyNote(color: .pink, content: "x", remoteId: "R-OLD", changeKey: "CK1")
             note.webNoteJSON = cached
             insertOwned(note)
-            try await SyncEngine(authManager: SyncAuthStub.shared, colorLedger: isolatedLedger()).uploadNote(note, token: "t", retryAuthOnFailure: false)
+            try await makeEngine(colorLedger: isolatedLedger()).uploadNote(note, token: "t", retryAuthOnFailure: false)
             let colours = colourOnly(colourProps(bodyJSON(try XCTUnwrap(MockURLProtocol.requests.first { $0.method == "POST" }))))
             XCTAssertNil(propValue(colours, id: colorPropId), "读取失败时绝不写 0x8B00")
             XCTAssertEqual(propValue(colours, id: webNotePropId), cached, "只搬运缓存的云端 _Note 原文；没有缓存就不写")
@@ -879,7 +901,7 @@ final class SyncEngineTests: XCTestCase {
         insertOwned(note)
         let ledger = isolatedLedger()
         note.setColor(.charcoal, ledger: ledger)
-        try await SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger).uploadNote(note, token: "t", retryAuthOnFailure: false)
+        try await makeEngine(colorLedger: ledger).uploadNote(note, token: "t", retryAuthOnFailure: false)
         XCTAssertEqual(MockURLProtocol.requests.map(\.method), ["PATCH", "POST", "DELETE"], "用户改过色：不需要读旧对象")
         let props = colourProps(bodyJSON(try XCTUnwrap(MockURLProtocol.requests.first { $0.method == "POST" })))
         try assertWebNoteColor(props, expected: 6)
@@ -890,7 +912,7 @@ final class SyncEngineTests: XCTestCase {
         MockURLProtocol.handler = { _ in .http(status: 201, json: ["id": "R-1", "changeKey": "CK", "body": ["content": "<div>n</div>"]]) }
         let note = StickyNote(color: .purple, content: "n")
         insertOwned(note)
-        try await SyncEngine(authManager: SyncAuthStub.shared, colorLedger: isolatedLedger()).uploadNote(note, token: "t")
+        try await makeEngine(colorLedger: isolatedLedger()).uploadNote(note, token: "t")
         let props = colourProps(bodyJSON(try XCTUnwrap(MockURLProtocol.requests.first)))
         try assertWebNoteColor(props, expected: 3)
     }
@@ -908,7 +930,7 @@ final class SyncEngineTests: XCTestCase {
             }
             return .http(status: 201, json: ["id": "R-COPY", "changeKey": "K"])
         }
-        await SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger).syncAll(modelContext: ctx)
+        await makeEngine(colorLedger: ledger).syncAll(modelContext: ctx)
         let copy = try XCTUnwrap(try ctx.fetch(FetchDescriptor<StickyNote>()).first { $0.plainTextContent == "local edit" })
         XCTAssertEqual(copy.remoteId, "R-COPY")
         let post = try XCTUnwrap(MockURLProtocol.requests.first { $0.method == "POST" })
@@ -932,7 +954,7 @@ final class SyncEngineTests: XCTestCase {
             }
             return .http(status: 201, json: ["id": "R-COPY", "changeKey": "K"])
         }
-        await SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger).syncAll(modelContext: ctx)
+        await makeEngine(colorLedger: ledger).syncAll(modelContext: ctx)
         let post = try XCTUnwrap(MockURLProtocol.requests.first { $0.method == "POST" })
         try assertWebNoteColor(colourProps(bodyJSON(post)), expected: 2)
         XCTAssertFalse(ledger.isDirty(local.id), "主便笺已取云端颜色，不再脏")
@@ -971,7 +993,7 @@ final class SyncEngineTests: XCTestCase {
             return .http(status: 200, json: [:])
         }
 
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         await engine.syncAll(modelContext: ctx)
 
         let remaining = try ctx.fetch(FetchDescriptor<StickyNote>())
@@ -983,7 +1005,7 @@ final class SyncEngineTests: XCTestCase {
         insertOwned(blank)
         try ctx.save()
 
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         XCTAssertTrue(engine.isUntouchedBlankNewNote(blank), "新建空便笺应判定为 untouched")
 
         var postCount = 0
@@ -1024,7 +1046,7 @@ final class SyncEngineTests: XCTestCase {
         }
 
         let ledger = isolatedLedger()
-        let engine = SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger)
+        let engine = makeEngine(colorLedger: ledger)
         await engine.syncAll(modelContext: ctx)
 
         XCTAssertEqual(local.noteColor, .purple, "已同步且本地未改色的便笺在同 changeKey 拉取时应按云端校正颜色")
@@ -1055,7 +1077,7 @@ final class SyncEngineTests: XCTestCase {
             return .http(status: 200, json: [:])
         }
 
-        let engine = SyncEngine(authManager: SyncAuthStub.shared)
+        let engine = makeEngine()
         await engine.syncAll(modelContext: ctx)
 
         XCTAssertEqual(note.createdAt, originalDate, "替换更新不得篡改原本地创建时间")
@@ -1092,7 +1114,7 @@ final class SyncEngineTests: XCTestCase {
         }
 
         let ledger = isolatedLedger()
-        let engine = SyncEngine(authManager: SyncAuthStub.shared, colorLedger: ledger)
+        let engine = makeEngine(colorLedger: ledger)
         await engine.syncAll(modelContext: ctx)
 
         XCTAssertEqual(note.syncStatus, .synced)

@@ -19,12 +19,14 @@ final class AccountIsolationTests: XCTestCase {
         auth.reset()
         let schema = Schema([StickyNote.self])
         container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
-        engine = SyncEngine(authManager: auth, debounceNanoseconds: 1_000_000)
         suiteName = "iso-tests-" + UUID().uuidString
         defaults = UserDefaults(suiteName: suiteName)
+        engine = SyncEngine(authManager: auth, debounceNanoseconds: 1_000_000,
+                            colorLedger: ColorEditLedger(defaults: defaults), defaults: defaults, startPeriodicSync: false)
         service = AccountIsolationService(auth: auth, ledger: AdoptionLedger(defaults: defaults))
     }
     override func tearDown() async throws {
+        engine?.cancelPendingWork()
         XCTAssertEqual(MockURLProtocol.heldCount, 0)
         MockURLProtocol.reset(); URLProtocol.unregisterClass(MockURLProtocol.self)
         defaults.removePersistentDomain(forName: suiteName)
@@ -464,7 +466,8 @@ final class AccountIsolationTests: XCTestCase {
         signIn("A")
         let n = add("edit", owner: "A", remote: "R-bound"); n.recoveryBlocksAutomaticRecreate = true; n.syncStatus = .pendingUpload
         MockURLProtocol.handler = { _ in .http(status: 403, json: [:]) }
-        engine = SyncEngine(authManager: auth)
+        engine?.cancelPendingWork()
+        engine = SyncEngine(authManager: auth, colorLedger: ColorEditLedger(defaults: defaults), defaults: defaults, startPeriodicSync: false)
         for _ in 0..<2 {
             do { try await engine.uploadNote(n, token: "t", retryAuthOnFailure: false); XCTFail() } catch { XCTAssertEqual((error as NSError).code, -42) }
         }

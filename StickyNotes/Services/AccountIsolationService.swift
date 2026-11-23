@@ -137,15 +137,23 @@ final class AccountIsolationService {
 
     private func adopt(ids: [UUID], accountID: String, modelContext: ModelContext) throws -> Int {
         let wanted = Set(ids)
-        var count = 0
+        var rollback: [(note: StickyNote, owner: String?, status: SyncStatus)] = []
         for note in try modelContext.fetch(FetchDescriptor<StickyNote>()) where wanted.contains(note.id) {
             guard note.ownership == .unlinkedLocal, !note.isDeletedLocally else { continue }
+            rollback.append((note, note.ownerAccountID, note.syncStatus))
             note.ownerAccountID = accountID
             note.syncStatus = .pendingUpload
-            count += 1
         }
-        try modelContext.save()
-        return count
+        do {
+            try modelContext.save()
+        } catch {
+            for item in rollback {
+                item.note.ownerAccountID = item.owner
+                item.note.syncStatus = item.status
+            }
+            throw error
+        }
+        return rollback.count
     }
 
     // MARK: Legacy (unknown ownership) quarantine
@@ -153,9 +161,14 @@ final class AccountIsolationService {
     /// Move a never-synced legacy note, one at a time and only on explicit request.
     func claimLegacy(_ note: StickyNote, to target: ClaimTarget, modelContext: ModelContext) throws {
         guard note.ownership == .legacyUnknown, !note.isDeleted else { throw IsolationError.notEligible("该便笺不在隔离区。") }
-        guard !note.hasCloudTrace, !note.isDeletedLocally else {
+        if note.isDeletedLocally {
+            throw IsolationError.notEligible("该遗留便笺已在本地标记删除，不能直接认领；请导出或另存为当前账号的新副本。")
+        }
+        guard !note.hasCloudTrace else {
             throw IsolationError.notEligible("该便笺带有云端痕迹，归属可能是任一账号，不能直接认领；请导出或另存为当前账号的新副本。")
         }
+        let previousOwner = note.ownerAccountID
+        let previousStatus = note.syncStatus
         switch target {
         case .currentAccount:
             let id = try verifiedAccountID()
@@ -164,7 +177,13 @@ final class AccountIsolationService {
         case .noAccountLocal:
             note.ownerAccountID = StickyNote.unlinkedOwnerMarker
         }
-        try modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            note.ownerAccountID = previousOwner
+            note.syncStatus = previousStatus
+            throw error
+        }
     }
 
     /// For legacy notes with cloud traces: explicit copy into the current account. The original stays
@@ -200,7 +219,12 @@ final class AccountIsolationService {
         copy.createdAt = note.createdAt
         copy.modifiedAt = note.modifiedAt
         modelContext.insert(copy)
-        try modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            modelContext.delete(copy)
+            throw error
+        }
         copyLedger.record(source: note.id, copy: copy.id, for: id)
         return copy
     }
@@ -209,40 +233,90 @@ final class AccountIsolationService {
 // MARK: - Local-only export (no Graph, no sign-in needed)
 
 enum LocalExporter {
+    private struct BundleExport: Encodable {
+        let formatVersion: Int
+        let exportedAt: Date
+        let includesOutOfScopeData: Bool
+        let noteCount: Int
+        let notes: [RecoveryContentExport]
+    }
+
+    private static func safeFinite(_ value: Double, fallback: Double) -> Double {
+        value.isFinite ? value : fallback
+    }
+
+    private static func makeEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+
     /// Full local content + metadata of a single note, without tokens. Same shape as the recovery export.
-    static func noteObject(_ note: StickyNote) throws -> [String: Any] {
-        let content = RecoveryContentExport(formatVersion: 1, localID: note.id, ownerAccountID: note.ownerAccountID,
-            plainText: note.plainTextContent, attributedContentData: note.attributedContentData, audioRecordings: note.audioRecordings,
-            color: note.colorRawValue, createdAt: note.createdAt, modifiedAt: note.modifiedAt,
-            windowFrame: [note.windowX, note.windowY, note.windowWidth, note.windowHeight], remoteID: note.remoteId,
-            changeKey: note.changeKey, webNoteJSON: note.webNoteJSON, isDeletedLocally: note.isDeletedLocally,
-            operationID: note.pendingCreateOperationID, operationEndpoint: note.pendingCreateEndpoint,
-            operationStartedAt: note.pendingCreateStartedAt, retainedRemoteIDs: note.recoveryRetainedRemoteIDs,
-            automaticCleanupRemoteIDs: note.pendingCleanupRemoteIDs, pendingRecoveryDeleteID: note.recoveryPendingDeleteID,
-            pendingRecoveryDeleteKind: note.recoveryPendingDeleteKindRaw, recoveryPaused: note.recoveryPaused, audit: note.recoveryAudit)
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
-        var json = try JSONSerialization.jsonObject(with: encoder.encode(content)) as! [String: Any]
-        json["rawRecoveryAuditBase64"] = note.recoveryAuditData?.base64EncodedString()
-        json["rawRecoveryRetainedIDsBase64"] = note.recoveryRetainedIDsData?.base64EncodedString()
-        json["rawCleanupIDsBase64"] = note.pendingCleanupIDsData?.base64EncodedString()
-        return json
+    static func noteRecord(_ note: StickyNote) -> RecoveryContentExport {
+        RecoveryContentExport(
+            formatVersion: 1,
+            localID: note.id,
+            ownerAccountID: note.ownerAccountID,
+            plainText: note.plainTextContent,
+            attributedContentData: note.attributedContentData,
+            audioRecordings: note.audioRecordings,
+            color: note.colorRawValue,
+            createdAt: note.createdAt,
+            modifiedAt: note.modifiedAt,
+            windowFrame: [
+                safeFinite(note.windowX, fallback: 0),
+                safeFinite(note.windowY, fallback: 0),
+                safeFinite(note.windowWidth, fallback: 300),
+                safeFinite(note.windowHeight, fallback: 350)
+            ],
+            remoteID: note.remoteId,
+            changeKey: note.changeKey,
+            webNoteJSON: note.webNoteJSON,
+            isDeletedLocally: note.isDeletedLocally,
+            operationID: note.pendingCreateOperationID,
+            operationEndpoint: note.pendingCreateEndpoint,
+            operationStartedAt: note.pendingCreateStartedAt,
+            retainedRemoteIDs: note.recoveryRetainedRemoteIDs,
+            automaticCleanupRemoteIDs: note.pendingCleanupRemoteIDs,
+            pendingRecoveryDeleteID: note.recoveryPendingDeleteID,
+            pendingRecoveryDeleteKind: note.recoveryPendingDeleteKindRaw,
+            recoveryPaused: note.recoveryPaused,
+            recoveryBlocksAutomaticRecreate: note.recoveryBlocksAutomaticRecreate,
+            recoveryIsArchive: note.recoveryIsArchive,
+            syncStatus: note.syncStatusRaw,
+            audit: note.recoveryAudit,
+            rawRecoveryAuditBase64: note.recoveryAuditData?.base64EncodedString(),
+            rawRecoveryRetainedIDsBase64: note.recoveryRetainedIDsData?.base64EncodedString(),
+            rawCleanupIDsBase64: note.pendingCleanupIDsData?.base64EncodedString()
+        )
+    }
+
+    static func encodeNote(_ note: StickyNote) throws -> Data {
+        try makeEncoder().encode(noteRecord(note))
     }
 
     /// Rules: notes visible in the active scope (including its hidden tombstones/recovery records) export
-    /// freely. Anything else (other accounts, quarantine, no-account data while signed in, or any note while
-    /// identity is unconfirmed) requires `acknowledgedOutOfScope`. Works signed out / offline; never writes.
-    static func export(_ notes: [StickyNote], scope: ActiveScope, acknowledgedOutOfScope: Bool) throws -> Data {
+    /// freely once identity is verified. Anything else (other accounts, quarantine, no-account data while signed in,
+    /// provisional unverified startup identity, or any note while identity is blocked) requires `acknowledgedOutOfScope`.
+    static func export(_ notes: [StickyNote], scope: ActiveScope, isIdentityVerified: Bool = true, acknowledgedOutOfScope: Bool) throws -> Data {
         let live = notes.filter { !$0.isDeleted }
-        let outOfScope = live.contains { !$0.isVisible(in: scope) }
+        let provisionalAccountScope: Bool
+        if case .account = scope, !isIdentityVerified {
+            provisionalAccountScope = true
+        } else {
+            provisionalAccountScope = false
+        }
+        let outOfScope = provisionalAccountScope || live.contains { !$0.isVisible(in: scope) }
         if outOfScope && !acknowledgedOutOfScope { throw IsolationError.needsAcknowledgement }
-        let object: [String: Any] = [
-            "formatVersion": 2,
-            "exportedAt": ISO8601DateFormatter().string(from: Date()),
-            "includesOutOfScopeData": outOfScope,
-            "noteCount": live.count,
-            "notes": try live.map(noteObject)
-        ]
-        return try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        let payload = BundleExport(
+            formatVersion: 2,
+            exportedAt: Date(),
+            includesOutOfScopeData: outOfScope,
+            noteCount: live.count,
+            notes: live.map(noteRecord)
+        )
+        return try makeEncoder().encode(payload)
     }
 }
 
@@ -322,6 +396,7 @@ protocol AdoptionPromptPresenting: AnyObject {
 /// notes-list view, so the question is asked even if the list window was closed or never shown (floating note
 /// windows only), and the dialog is an app-level alert, not part of any window's view tree.
 @MainActor
+@Observable
 final class AdoptionPromptCoordinator {
     static let shared = AdoptionPromptCoordinator()
 
@@ -333,9 +408,10 @@ final class AdoptionPromptCoordinator {
     private var accountLabel: () -> String
     private var started = false
     private var evaluating = false
-    /// Prompts already answered or skipped in this login session (account + generation): never re-asked in a loop.
-    private var handled: Set<String> = []
-    private(set) var lastError: String?
+    /// Note IDs explicitly skipped ("Not Now"/Esc) in this login session (`account|generation`),
+    /// so we never re-ask about skipped notes in a loop while still allowing newly created notes or retry on error.
+    private var skippedInSession: [String: Set<UUID>] = [:]
+    var lastError: String?
 
     init(auth: any SyncAuthProviding = AuthManager.shared, service: AccountIsolationService = .shared,
          accountLabel: @escaping () -> String = { "this account" }) {
@@ -375,23 +451,37 @@ final class AdoptionPromptCoordinator {
         guard !evaluating, let context, let presenter else { return }
         evaluating = true
         defer { evaluating = false }
-        while let prompt = try? service.pendingPrompt(modelContext: context) {
-            let key = "\(prompt.accountID)|\(prompt.generation.uuidString)"
-            guard !handled.contains(key) else { return }
-            handled.insert(key)
+        while let rawPrompt = try? service.pendingPrompt(modelContext: context) {
+            let sessionKey = "\(rawPrompt.accountID)|\(rawPrompt.generation.uuidString)"
+            let alreadySkipped = skippedInSession[sessionKey] ?? []
+            let remainingIDs = rawPrompt.noteIDs.filter { !alreadySkipped.contains($0) }
+            guard !remainingIDs.isEmpty else { return }
+            let prompt = AccountIsolationService.AdoptionPrompt(
+                accountID: rawPrompt.accountID,
+                generation: rawPrompt.generation,
+                noteIDs: remainingIDs
+            )
             let notes = (try? context.fetch(FetchDescriptor<StickyNote>())) ?? []
-            let titles = notes.filter { prompt.noteIDs.contains($0.id) }.prefix(3).map(\.title)
-            let choice = await presenter.present(AdoptionPromptInfo(accountLabel: accountLabel(), count: prompt.noteIDs.count, titles: titles))
+            let remainingSet = Set(remainingIDs)
+            let titles = notes.filter { remainingSet.contains($0.id) }.prefix(3).map(\.title)
+            let choice = await presenter.present(AdoptionPromptInfo(accountLabel: accountLabel(), count: remainingIDs.count, titles: titles))
             do {
                 switch choice {
                 case .accept:
                     try service.accept(prompt, modelContext: context)
+                    lastError = nil
                     await afterAccept?(context)
-                case .decline: try service.decline(prompt)
-                case .skip: service.skip(prompt)
+                case .decline:
+                    try service.decline(prompt)
+                    lastError = nil
+                case .skip:
+                    service.skip(prompt)
+                    skippedInSession[sessionKey, default: []].formUnion(remainingIDs)
                 }
             } catch {
                 lastError = error.localizedDescription   // stale prompt (signed out/switched while open): nothing changed
+                // Prevent tight retry loop within this evaluate() pass; a future state change can re-evaluate.
+                skippedInSession[sessionKey, default: []].formUnion(remainingIDs)
             }
         }
     }

@@ -3,7 +3,7 @@ import Foundation
 enum RecoveryRemoteKind: String, Codable, CaseIterable {
     case graphNote, mailNote
     var collection: String { self == .graphNote ? "me/notes" : "me/messages" }
-    var label: String { self == .graphNote ? "Graph Note" : "Mailbox Sticky Note" }
+    var label: String { self == .graphNote ? String(localized: "Graph Note") : String(localized: "Mailbox Sticky Note") }
 }
 
 enum RecoveryAction: String {
@@ -24,6 +24,50 @@ struct RecoveryAuditEntry: Codable {
     var relatedLocalIDs: [UUID] = []
     /// Full cloud body preserved before an association (S3-C). Optional so older journals still decode.
     var candidateHTML: String? = nil
+
+    init(
+        date: Date = Date(),
+        accountID: String,
+        action: String,
+        reason: String,
+        priorOperationID: String?,
+        remoteID: String?,
+        kind: RecoveryRemoteKind?,
+        changeKey: String?,
+        priorEndpoint: String? = nil,
+        priorStartedAt: Date? = nil,
+        relatedLocalIDs: [UUID] = [],
+        candidateHTML: String? = nil
+    ) {
+        self.date = date
+        self.accountID = accountID
+        self.action = action
+        self.reason = reason
+        self.priorOperationID = priorOperationID
+        self.remoteID = remoteID
+        self.kind = kind
+        self.changeKey = changeKey
+        self.priorEndpoint = priorEndpoint
+        self.priorStartedAt = priorStartedAt
+        self.relatedLocalIDs = relatedLocalIDs
+        self.candidateHTML = candidateHTML
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        date = try c.decodeIfPresent(Date.self, forKey: .date) ?? Date(timeIntervalSince1970: 0)
+        accountID = try c.decode(String.self, forKey: .accountID)
+        action = try c.decode(String.self, forKey: .action)
+        reason = try c.decode(String.self, forKey: .reason)
+        priorOperationID = try c.decodeIfPresent(String.self, forKey: .priorOperationID)
+        remoteID = try c.decodeIfPresent(String.self, forKey: .remoteID)
+        kind = try c.decodeIfPresent(RecoveryRemoteKind.self, forKey: .kind)
+        changeKey = try c.decodeIfPresent(String.self, forKey: .changeKey)
+        priorEndpoint = try c.decodeIfPresent(String.self, forKey: .priorEndpoint)
+        priorStartedAt = try c.decodeIfPresent(Date.self, forKey: .priorStartedAt)
+        relatedLocalIDs = try c.decodeIfPresent([UUID].self, forKey: .relatedLocalIDs) ?? []
+        candidateHTML = try c.decodeIfPresent(String.self, forKey: .candidateHTML)
+    }
 }
 
 struct VerifiedRecoveryCandidate {
@@ -65,5 +109,11 @@ struct RecoveryContentExport: Codable {
     let pendingRecoveryDeleteID: String?
     let pendingRecoveryDeleteKind: String?
     let recoveryPaused: Bool
+    var recoveryBlocksAutomaticRecreate: Bool = false
+    var recoveryIsArchive: Bool = false
+    var syncStatus: String = SyncStatus.pendingUpload.rawValue
     let audit: [RecoveryAuditEntry]
+    var rawRecoveryAuditBase64: String? = nil
+    var rawRecoveryRetainedIDsBase64: String? = nil
+    var rawCleanupIDsBase64: String? = nil
 }

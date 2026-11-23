@@ -393,10 +393,20 @@ enum NotePasteSupport {
     }
 
     static func findNoteTextView(in view: NSView?) -> NSTextView? {
+        // Prefer an editable rich-text NSTextView (the note editor) over plain single-line field editors (e.g. Find bar).
+        if let rich = findTextView(in: view, requireRichText: true) {
+            return rich
+        }
+        return findTextView(in: view, requireRichText: false)
+    }
+
+    private static func findTextView(in view: NSView?, requireRichText: Bool) -> NSTextView? {
         guard let view else { return nil }
-        if let textView = view as? NSTextView { return textView }
+        if let textView = view as? NSTextView, textView.isEditable, (!requireRichText || textView.isRichText) {
+            return textView
+        }
         for subview in view.subviews {
-            if let found = findNoteTextView(in: subview) { return found }
+            if let found = findTextView(in: subview, requireRichText: requireRichText) { return found }
         }
         return nil
     }

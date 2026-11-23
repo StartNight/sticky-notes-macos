@@ -56,31 +56,70 @@ final class AuthManager: NSObject, SyncAuthProviding {
     private(set) var keychainWork: Task<Void, Never>?
 
     // MARK: - Configuration
+    static let defaultClientId = "913bf285-76cb-4cfa-be2c-790c382ea428"
+    static let defaultRedirectUri = "msauth.com.shenanigans.sticky-notes://auth"
+
     var clientId: String {
         get {
-            UserDefaults.standard.string(forKey: "ms_client_id") ?? "913bf285-76cb-4cfa-be2c-790c382ea428"
+            let stored = defaults.string(forKey: "ms_client_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return stored.isEmpty ? Self.defaultClientId : stored
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: "ms_client_id")
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                defaults.removeObject(forKey: "ms_client_id")
+            } else {
+                defaults.set(trimmed, forKey: "ms_client_id")
+            }
         }
     }
 
     var redirectUri: String {
         get {
-            UserDefaults.standard.string(forKey: "ms_redirect_uri") ?? "msauth.com.shenanigans.sticky-notes://auth"
+            let stored = defaults.string(forKey: "ms_redirect_uri")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return stored.isEmpty ? Self.defaultRedirectUri : stored
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: "ms_redirect_uri")
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                defaults.removeObject(forKey: "ms_redirect_uri")
+            } else {
+                defaults.set(trimmed, forKey: "ms_redirect_uri")
+            }
         }
     }
 
-    var callbackScheme: String {
-        let uri = redirectUri
-        if let scheme = uri.components(separatedBy: "://").first, !scheme.isEmpty {
-            return scheme
-        }
-        return "msauth.com.shenanigans.sticky-notes"
+    func resetOAuthConfiguration() {
+        defaults.removeObject(forKey: "ms_client_id")
+        defaults.removeObject(forKey: "ms_redirect_uri")
     }
+
+    var callbackScheme: String {
+        Self.validatedCallbackScheme(from: redirectUri) ?? "msauth.com.shenanigans.sticky-notes"
+    }
+
+    private static func validatedCallbackScheme(from uriString: String) -> String? {
+        guard let components = URLComponents(string: uriString),
+              let scheme = components.scheme, !scheme.isEmpty,
+              let first = scheme.unicodeScalars.first, CharacterSet.letters.contains(first) else {
+            return nil
+        }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "+-."))
+        guard scheme.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
+        return scheme
+    }
+
+    /// Dedicated ephemeral session so OAuth tokens and `/me` profiles are never written to disk URLCache or shared cookies.
+    private static let defaultEphemeralSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60
+        return URLSession(configuration: config)
+    }()
 
     private let scopes = "Mail.ReadWrite ShortNotes.ReadWrite offline_access User.Read"
     private let keychain: KeychainHelper
@@ -103,6 +142,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
     private var lastRefreshSuccess: Date?
     private var refreshFailureCount = 0
     private var refreshBackoffUntil: Date?
+    private var refreshBackoffSetAt: Date?
     static let refreshBackoffBase: TimeInterval = 30
     static let refreshBackoffCap: TimeInterval = 900
     private(set) var refreshNetworkCallCount = 0
@@ -112,6 +152,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
     private let kAccountID = "ms_graph_account_id"
     static let usesEphemeralSession = true
     private var currentAuthSession: ASWebAuthenticationSession?
+    private var fallbackAnchorWindow: NSWindow?
     /// Test seam: replaces the system web-auth sheet. Receives (authorization URL, callback scheme) and returns the
     /// callback URL, or throws (e.g. the user cancelled). Production leaves it nil.
     var authSessionRunner: (@MainActor (URL, String) async throws -> URL)?
@@ -138,14 +179,14 @@ final class AuthManager: NSObject, SyncAuthProviding {
     private let kUserName = "ms_user_name"
 
     init(keychain: KeychainHelper = .shared, defaults: UserDefaults = .standard,
-         network: URLSession = .shared, loadStoredAuth: Bool = true, verifyIdentityAfterRestore: Bool = true,
+         network: URLSession? = nil, loadStoredAuth: Bool = true, verifyIdentityAfterRestore: Bool = true,
          refreshCooldown: TimeInterval = 60, now: @escaping () -> Date = Date.init) {
         self.verifyIdentityAfterRestore = verifyIdentityAfterRestore
         self.refreshCooldown = refreshCooldown
         self.now = now
         self.keychain = keychain
         self.defaults = defaults
-        self.network = network
+        self.network = network ?? Self.defaultEphemeralSession
         super.init()
         if loadStoredAuth { beginRestore() }
     }
@@ -154,8 +195,30 @@ final class AuthManager: NSObject, SyncAuthProviding {
 
     func beginRestore() {
         NSLog("AUTH_FLOW phase=restore")
+        switch restoreState {
+        case .denied, .failed:
+            return
+        case .idle, .loading, .needsConsent, .done:
+            break
+        }
         guard !defaults.bool(forKey: "ms_explicitly_signed_out") else { restoreState = .done; return }
-        if keychain.isHydrated { applyStoredAuth(); restoreState = .done; startIdentityVerification(); return } // memory only, no I/O
+        if keychain.isHydrated {
+            switch keychain.loadState {
+            case .ready:
+                applyStoredAuth()
+                restoreState = .done
+                startIdentityVerification()
+            case .denied(let s):
+                restoreState = .denied(s)
+            case .failed(let s):
+                restoreState = .failed(s)
+            case .needsConsent:
+                restoreState = .needsConsent
+            case .idle:
+                break
+            }
+            return
+        } // memory only, no I/O
         restoreState = .loading
         let generation = sessionGeneration
         restoreTask = Task { [weak self] in
@@ -232,12 +295,20 @@ final class AuthManager: NSObject, SyncAuthProviding {
         // No automatic developer-token-file import: sign-out must survive relaunch.
     }
 
-    func authorizationURL(state: String, challenge: String) throws -> URL {
-        var components = URLComponents(string: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize")!
+    func authorizationURL(state: String, challenge: String, clientId overrideClientId: String? = nil, redirectUri overrideRedirectUri: String? = nil) throws -> URL {
+        let activeClientId = (overrideClientId ?? clientId).trimmingCharacters(in: .whitespacesAndNewlines)
+        let activeRedirectUri = (overrideRedirectUri ?? redirectUri).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !activeClientId.isEmpty,
+              Self.validatedCallbackScheme(from: activeRedirectUri) != nil else {
+            throw NSError(domain: "AuthManager", code: -17, userInfo: [NSLocalizedDescriptionKey: "Invalid OAuth client ID or redirect URI configuration"])
+        }
+        guard var components = URLComponents(string: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize") else {
+            throw NSError(domain: "AuthManager", code: -17, userInfo: [NSLocalizedDescriptionKey: "Invalid authorization endpoint"])
+        }
         components.queryItems = [
-            URLQueryItem(name: "client_id", value: clientId),
+            URLQueryItem(name: "client_id", value: activeClientId),
             URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "redirect_uri", value: redirectUri),
+            URLQueryItem(name: "redirect_uri", value: activeRedirectUri),
             URLQueryItem(name: "response_mode", value: "query"),
             URLQueryItem(name: "scope", value: scopes),
             URLQueryItem(name: "state", value: state),
@@ -245,7 +316,9 @@ final class AuthManager: NSObject, SyncAuthProviding {
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "prompt", value: "select_account")
         ]
-        guard let url = components.url else { throw CancellationError() }
+        guard let url = components.url else {
+            throw NSError(domain: "AuthManager", code: -17, userInfo: [NSLocalizedDescriptionKey: "Could not build authorization URL"])
+        }
         return url
     }
 
@@ -288,17 +361,25 @@ final class AuthManager: NSObject, SyncAuthProviding {
         defer { if sessionGeneration == generation { isAuthenticating = false; currentAuthSession = nil } }
 
         do {
+        // Snapshot OAuth config at sign-in start so concurrent preference edits cannot desynchronize code exchange.
+        let activeClientId = clientId
+        let activeRedirectUri = redirectUri
+        guard let activeScheme = Self.validatedCallbackScheme(from: activeRedirectUri),
+              let expectedRedirect = URLComponents(string: activeRedirectUri) else {
+            throw NSError(domain: "AuthManager", code: -17, userInfo: [NSLocalizedDescriptionKey: "Invalid OAuth redirect URI configuration"])
+        }
+
         // 1. Generate PKCE parameters
         let codeVerifier = try generateCodeVerifier()
         let codeChallenge = generateCodeChallenge(from: codeVerifier)
         let state = try generateOAuthState()
 
-        let authURL = try authorizationURL(state: state, challenge: codeChallenge)
+        let authURL = try authorizationURL(state: state, challenge: codeChallenge, clientId: activeClientId, redirectUri: activeRedirectUri)
 
         // 3. Launch ASWebAuthenticationSession
         let callbackURL: URL
         if let runner = authSessionRunner {
-            callbackURL = try await runner(authURL, callbackScheme)
+            callbackURL = try await runner(authURL, activeScheme)
         } else {
             callbackURL = try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
@@ -316,7 +397,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
 
                     let session = ASWebAuthenticationSession(
                         url: authURL,
-                        callbackURLScheme: callbackScheme
+                        callbackURLScheme: activeScheme
                     ) { callbackURL, error in
                         if let error {
                             resumeOnce(.failure(error))
@@ -349,6 +430,13 @@ final class AuthManager: NSObject, SyncAuthProviding {
             throw NSError(domain: "AuthManager", code: -3, userInfo: [NSLocalizedDescriptionKey: "Invalid callback URL"])
         }
 
+        let schemeMatches = urlComponents.scheme?.lowercased() == activeScheme.lowercased()
+        let hostMatches = expectedRedirect.host == nil || urlComponents.host?.lowercased() == expectedRedirect.host?.lowercased()
+        let pathMatches = expectedRedirect.path.isEmpty || urlComponents.path == expectedRedirect.path
+        guard schemeMatches && hostMatches && pathMatches else {
+            throw NSError(domain: "AuthManager", code: -3, userInfo: [NSLocalizedDescriptionKey: "Callback URL does not match configured redirect URI"])
+        }
+
         if let error = urlComponents.queryItems?.first(where: { $0.name == "error" })?.value {
             let errorDesc = urlComponents.queryItems?.first(where: { $0.name == "error_description" })?.value ?? error
             throw NSError(domain: "AuthManager", code: -4, userInfo: [NSLocalizedDescriptionKey: errorDesc])
@@ -364,7 +452,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
         }
 
         // 5. Exchange code for access & refresh tokens and verify identity before writing to keychain once
-        try await exchangeAuthCode(authCode, codeVerifier: codeVerifier)
+        try await exchangeAuthCode(authCode, codeVerifier: codeVerifier, clientId: activeClientId, redirectUri: activeRedirectUri)
         try requireGeneration(generation)
         restoreTask?.cancel()
         restoreTask = nil
@@ -410,7 +498,14 @@ final class AuthManager: NSObject, SyncAuthProviding {
 
     // MARK: - Token Exchange
 
-    private func exchangeAuthCode(_ code: String, codeVerifier: String) async throws {
+    private static func parseExpiresIn(_ value: Any?) -> TimeInterval {
+        if let d = value as? Double, d.isFinite, d > 0 { return d }
+        if let i = value as? Int, i > 0 { return TimeInterval(i) }
+        if let s = value as? String, let d = Double(s.trimmingCharacters(in: .whitespacesAndNewlines)), d.isFinite, d > 0 { return d }
+        return 3600
+    }
+
+    private func exchangeAuthCode(_ code: String, codeVerifier: String, clientId activeClientId: String, redirectUri activeRedirectUri: String) async throws {
         guard let tokenURL = URL(string: "https://login.microsoftonline.com/common/oauth2/v2.0/token") else {
             throw NSError(domain: "AuthManager", code: -7, userInfo: [NSLocalizedDescriptionKey: "Invalid token endpoint"])
         }
@@ -420,10 +515,10 @@ final class AuthManager: NSObject, SyncAuthProviding {
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
 
         let params: [String: String] = [
-            "client_id": clientId,
+            "client_id": activeClientId,
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": redirectUri,
+            "redirect_uri": activeRedirectUri,
             "code_verifier": codeVerifier,
             "scope": scopes
         ]
@@ -442,7 +537,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
         }
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let accessToken = json["access_token"] as? String else {
+              let accessToken = json["access_token"] as? String, !accessToken.isEmpty else {
             throw NSError(domain: "AuthManager", code: -9, userInfo: [NSLocalizedDescriptionKey: "Invalid token response format"])
         }
 
@@ -458,8 +553,8 @@ final class AuthManager: NSObject, SyncAuthProviding {
 
         var values = [kAccessToken: accessToken, kRefreshToken: json["refresh_token"] as? String ?? "",
                       kAccountID: id, kUserEmail: email, kUserName: name]
-        let seconds = (json["expires_in"] as? Double) ?? 3600
-        values[kTokenExpiry] = String(Date().addingTimeInterval(seconds).timeIntervalSince1970)
+        let seconds = Self.parseExpiresIn(json["expires_in"])
+        values[kTokenExpiry] = String(now().addingTimeInterval(seconds).timeIntervalSince1970)
         let saved = await keychain.replaceSessionAsync(strings: values)
         try requireGeneration(generation)
         guard saved else {
@@ -510,15 +605,28 @@ final class AuthManager: NSObject, SyncAuthProviding {
             return token
         }
         // Sequential callers (e.g. one 403 per note in a single sync pass) share the refresh that just succeeded.
-        if let last = lastRefreshSuccess, now().timeIntervalSince(last) < refreshCooldown,
-           let token = keychain.readString(key: kAccessToken), !token.isEmpty {
-            NSLog("AUTH_FLOW phase=refresh-coalesced")
-            return token
+        // Require non-negative elapsed time so a backward system clock jump cannot freeze cooldown indefinitely.
+        let currentTime = now()
+        if let last = lastRefreshSuccess {
+            let elapsed = currentTime.timeIntervalSince(last)
+            if elapsed >= 0, elapsed < refreshCooldown,
+               let token = keychain.readString(key: kAccessToken), !token.isEmpty {
+                NSLog("AUTH_FLOW phase=refresh-coalesced")
+                return token
+            } else if elapsed < 0 {
+                lastRefreshSuccess = nil
+            }
         }
         // After a failed refresh (offline, 5xx, keychain write failure) wait out an exponential backoff.
-        if let until = refreshBackoffUntil, now() < until {
-            NSLog("AUTH_FLOW phase=refresh-backoff")
-            throw NSError(domain: "AuthManager", code: -16, userInfo: [NSLocalizedDescriptionKey: "令牌刷新刚失败过，稍后自动重试（退避中）。"])
+        if let until = refreshBackoffUntil {
+            if let setAt = refreshBackoffSetAt, currentTime < setAt {
+                // Clock stepped backward: discard stale wall-clock backoff instead of locking out refresh.
+                refreshBackoffUntil = nil
+                refreshBackoffSetAt = nil
+            } else if currentTime < until {
+                NSLog("AUTH_FLOW phase=refresh-backoff")
+                throw NSError(domain: "AuthManager", code: -16, userInfo: [NSLocalizedDescriptionKey: "令牌刷新刚失败过，稍后自动重试（退避中）。"])
+            }
         }
         let task = Task { try await self.performRefresh(generation: generation) }
         refreshTask = task
@@ -536,6 +644,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
                 lastRefreshSuccess = now()
                 refreshFailureCount = 0
                 refreshBackoffUntil = nil
+                refreshBackoffSetAt = nil
             }
             return token
         } catch {
@@ -543,7 +652,9 @@ final class AuthManager: NSObject, SyncAuthProviding {
             if sessionGeneration == generation, isAuthenticated, !(error is CancellationError) {
                 refreshFailureCount += 1
                 let delay = min(Self.refreshBackoffBase * pow(2, Double(refreshFailureCount - 1)), Self.refreshBackoffCap)
-                refreshBackoffUntil = now().addingTimeInterval(delay)
+                let t = now()
+                refreshBackoffSetAt = t
+                refreshBackoffUntil = t.addingTimeInterval(delay)
             }
             throw error
         }
@@ -553,6 +664,7 @@ final class AuthManager: NSObject, SyncAuthProviding {
         lastRefreshSuccess = nil
         refreshFailureCount = 0
         refreshBackoffUntil = nil
+        refreshBackoffSetAt = nil
     }
 
     private func performRefreshRequest(generation: UUID) async throws -> String {
@@ -596,14 +708,14 @@ final class AuthManager: NSObject, SyncAuthProviding {
         }
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let newAccessToken = json["access_token"] as? String else {
+              let newAccessToken = json["access_token"] as? String, !newAccessToken.isEmpty else {
             throw NSError(domain: "AuthManager", code: -12, userInfo: [NSLocalizedDescriptionKey: "Invalid refresh response format"])
         }
 
         var values = [kAccessToken: newAccessToken]
-        if let refresh = json["refresh_token"] as? String { values[kRefreshToken] = refresh }
-        let seconds = (json["expires_in"] as? Double) ?? 3600
-        values[kTokenExpiry] = String(Date().addingTimeInterval(seconds).timeIntervalSince1970)
+        if let refresh = json["refresh_token"] as? String, !refresh.isEmpty { values[kRefreshToken] = refresh }
+        let seconds = Self.parseExpiresIn(json["expires_in"])
+        values[kTokenExpiry] = String(now().addingTimeInterval(seconds).timeIntervalSince1970)
         let saved = await keychain.updateAsync(strings: values)
         try requireGeneration(generation)
         guard saved else {
@@ -781,6 +893,26 @@ final class AuthManager: NSObject, SyncAuthProviding {
 
 extension AuthManager: ASWebAuthenticationPresentationContextProviding {
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        NSApplication.shared.windows.first { $0.isVisible } ?? NSApplication.shared.windows.first ?? NSWindow()
+        let isStableHostWindow: (NSWindow) -> Bool = { w in
+            w.isVisible && w.level == .normal && !w.isSheet && !(w is NSPanel)
+        }
+        if let key = NSApplication.shared.keyWindow, isStableHostWindow(key) {
+            return key
+        }
+        if let main = NSApplication.shared.mainWindow, isStableHostWindow(main) {
+            return main
+        }
+        if let normal = NSApplication.shared.windows.first(where: isStableHostWindow) {
+            return normal
+        }
+        if let visible = NSApplication.shared.windows.first(where: { $0.isVisible && !($0 is NSPanel) }) {
+            return visible
+        }
+        if let fallback = fallbackAnchorWindow {
+            return fallback
+        }
+        let created = NSWindow()
+        fallbackAnchorWindow = created
+        return created
     }
 }

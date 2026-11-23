@@ -76,6 +76,24 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(missing.sorted(), [], "源码中未收录到 xcstrings 的文案: \(missing.sorted())")
     }
 
+    func testNoOrphanKeysInCatalog() throws {
+        let strings = try loadCatalog()
+        let srcDir = projectRoot.appendingPathComponent("StickyNotes")
+        let re = try NSRegularExpression(pattern: #"String\(localized:\s*"((?:[^"\\]|\\.)*)""#)
+        var used: Set<String> = []
+        let en = FileManager.default.enumerator(at: srcDir, includingPropertiesForKeys: nil)!
+        for case let url as URL in en where url.pathExtension == "swift" {
+            let src = try String(contentsOf: url, encoding: .utf8)
+            for m in re.matches(in: src, range: NSRange(src.startIndex..., in: src)) {
+                var key = (src as NSString).substring(with: m.range(at: 1))
+                key = key.replacingOccurrences(of: #"\\\([^)]*\)"#, with: "%@", options: .regularExpression)
+                used.insert(key)
+            }
+        }
+        let orphans = Set(strings.keys).subtracting(used).sorted()
+        XCTAssertEqual(orphans, [], "xcstrings 中存在源码未使用的孤立文案 key: \(orphans)")
+    }
+
     func testListAndNoteWindowTitlesDiffer() throws {
         let strings = try loadCatalog()
         let listZh = value(strings["Notes List"], lang: "zh-Hans").value

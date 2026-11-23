@@ -16,18 +16,41 @@ final class NoteEditorPasteTests: XCTestCase {
         return (proxy, textView)
     }
 
-    private func withPasteboardString(_ value: String, _ body: () -> Void) {
+    /// Snapshot and restore EVERY pasteboard item and representation so running unit tests never wipes
+    /// images, files, or rich text from the developer's system clipboard.
+    private func withPreservedPasteboard(_ body: (NSPasteboard) -> Void) {
         let pasteboard = NSPasteboard.general
-        let previous = pasteboard.string(forType: .string)
-        pasteboard.clearContents()
-        XCTAssertTrue(pasteboard.setString(value, forType: .string))
-        defer {
-            pasteboard.clearContents()
-            if let previous {
-                pasteboard.setString(previous, forType: .string)
+        let savedItems: [[(NSPasteboard.PasteboardType, Data)]] = (pasteboard.pasteboardItems ?? []).map { item in
+            item.types.compactMap { type in
+                guard let data = item.data(forType: type) else { return nil }
+                return (type, data)
             }
         }
-        body()
+        defer {
+            pasteboard.clearContents()
+            if !savedItems.isEmpty {
+                let restored: [NSPasteboardItem] = savedItems.compactMap { reps in
+                    guard !reps.isEmpty else { return nil }
+                    let item = NSPasteboardItem()
+                    for (type, data) in reps {
+                        item.setData(data, forType: type)
+                    }
+                    return item
+                }
+                if !restored.isEmpty {
+                    pasteboard.writeObjects(restored)
+                }
+            }
+        }
+        body(pasteboard)
+    }
+
+    private func withPasteboardString(_ value: String, _ body: () -> Void) {
+        withPreservedPasteboard { pasteboard in
+            pasteboard.clearContents()
+            XCTAssertTrue(pasteboard.setString(value, forType: .string))
+            body()
+        }
     }
 
     func testFindNoteTextViewDescendsIntoScrollView() {
@@ -77,18 +100,11 @@ final class NoteEditorPasteTests: XCTestCase {
             value: NSUnderlineStyle.single.rawValue,
             range: NSRange(location: 0, length: 1)
         )
-        let pasteboard = NSPasteboard.general
-        let previous = pasteboard.string(forType: .string)
-        pasteboard.clearContents()
-        XCTAssertTrue(pasteboard.writeObjects([rich]))
-        defer {
+        withPreservedPasteboard { pasteboard in
             pasteboard.clearContents()
-            if let previous {
-                pasteboard.setString(previous, forType: .string)
-            }
+            XCTAssertTrue(pasteboard.writeObjects([rich]))
+            textView.paste(nil)
         }
-
-        textView.paste(nil)
         XCTAssertEqual(textView.string, "AZ")
         let underline = textView.textStorage?.attribute(
             .underlineStyle,

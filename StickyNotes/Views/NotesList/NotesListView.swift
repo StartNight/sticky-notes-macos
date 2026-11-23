@@ -9,10 +9,13 @@ struct NotesListView: View {
     @Query(sort: \StickyNote.modifiedAt, order: .reverse) private var notes: [StickyNote]
     @State private var authManager = AuthManager.shared
     @State private var syncEngine = SyncEngine.shared
+    @State private var adoptionCoordinator = AdoptionPromptCoordinator.shared
     @State private var searchText = ""
     @State private var noteToDeleteID: UUID?
     @State private var showDeleteConfirmation = false
     @State private var showSyncPopover = false
+    @State private var popoverSignInError: String?
+    @State private var isSpinning = false
     @State private var isCollapsed = false
     @AppStorage("confirmBeforeDelete") private var confirmBeforeDelete = true
     @AppStorage("followActiveApp") private var followActiveApp = true
@@ -134,8 +137,14 @@ struct NotesListView: View {
                     Image(systemName: "arrow.triangle.2.circlepath")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.blue)
-                        .rotationEffect(.degrees(360))
-                        .animation(.linear(duration: 1).repeatForever(autoreverses: false), value: syncEngine.state)
+                        .rotationEffect(.degrees(isSpinning ? 360 : 0))
+                        .onAppear {
+                            isSpinning = false
+                            withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
+                                isSpinning = true
+                            }
+                        }
+                        .onDisappear { isSpinning = false }
                 case .error:
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 14, weight: .medium))
@@ -219,6 +228,7 @@ struct NotesListView: View {
                     Spacer()
 
                     Button(String(localized: "Sign Out"), role: .destructive) {
+                        popoverSignInError = nil
                         authManager.signOut()
                         syncEngine.resetForSignOut()
                     }
@@ -230,17 +240,22 @@ struct NotesListView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    if let err = authManager.lastAuthError {
+                    if let err = popoverSignInError ?? authManager.lastAuthError {
                         Text(err)
                             .font(.system(size: 11))
                             .foregroundStyle(.red)
                     }
 
                     Button {
+                        popoverSignInError = nil
                         Task {
-                            try? await authManager.signIn()
-                            if authManager.isAuthenticated {
-                                await syncEngine.syncAll(modelContext: modelContext)
+                            do {
+                                try await authManager.signIn()
+                                if authManager.isAuthenticated {
+                                    await syncEngine.syncAll(modelContext: modelContext)
+                                }
+                            } catch {
+                                popoverSignInError = error.localizedDescription
                             }
                         }
                     } label: {
@@ -315,6 +330,20 @@ struct NotesListView: View {
                         onDelete: { requestDelete(note) }
                         )
                     }
+                }
+                if let adoptionError = adoptionCoordinator.lastError {
+                    Text(adoptionError)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 4)
+                }
+                if let hint = hiddenDataHint {
+                    Text(hint)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 6)
                 }
             }
             .padding(.horizontal, 16)

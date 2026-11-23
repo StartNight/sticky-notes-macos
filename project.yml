@@ -44,6 +44,7 @@ targets:
         Release:
           # Release must not carry the debugger entitlement (com.apple.security.get-task-allow).
           CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+          DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
           # Binary size optimization while keeping Universal (arm64 + x86_64) compatibility.
           DEAD_CODE_STRIPPING: YES
           DEPLOYMENT_POSTPROCESSING: YES
@@ -72,7 +73,10 @@ targets:
       - StickyNotes/Services/SyncRecoveryTypes.swift
       - StickyNotes/Services/AccountIsolationService.swift
       - StickyNotes/Services/TextEditorProxy.swift
+      - StickyNotes/Services/WindowManager.swift
       - StickyNotes/Utilities/ColorExtensions.swift
+      - StickyNotes/Utilities/DateFormatting.swift
+      - StickyNotes/Utilities/DurationFormatting.swift
       - StickyNotes/Utilities/KeychainHelper.swift
       - StickyNotes/Utilities/URLDetector.swift
     settings:

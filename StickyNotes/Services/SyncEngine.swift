@@ -46,26 +46,26 @@ final class SyncEngine {
     var incompleteTaskCount = 0
     var lastSyncDate: Date? {
         get {
-            let timestamp = UserDefaults.standard.double(forKey: lastSyncKey)
+            let timestamp = defaults.double(forKey: lastSyncKey)
             return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
         }
         set {
             if let newValue {
-                UserDefaults.standard.set(newValue.timeIntervalSince1970, forKey: lastSyncKey)
+                defaults.set(newValue.timeIntervalSince1970, forKey: lastSyncKey)
             } else {
-                UserDefaults.standard.removeObject(forKey: lastSyncKey)
+                defaults.removeObject(forKey: lastSyncKey)
             }
         }
     }
 
     private let authManager: any SyncAuthProviding
-
+    private let defaults: UserDefaults
     private let colorLedger: ColorEditLedger
     private let graphEndpoint = "https://graph.microsoft.com/v1.0"
     private var debounceTasks: [UUID: Task<Void, Never>] = [:]
     private var debounceTokens: [UUID: UUID] = [:]
     private(set) var activeScheduledPushCount = 0
-    private var periodicTimer: Timer?
+    private nonisolated(unsafe) var periodicTimer: Timer?
     private let debounceNanoseconds: UInt64
     private var fullSyncRunning = false
     private var pullInProgress = false
@@ -223,12 +223,22 @@ final class SyncEngine {
     }
 
 
-    init(authManager: any SyncAuthProviding = AuthManager.shared, debounceNanoseconds: UInt64 = 1_500_000_000,
-         colorLedger: ColorEditLedger = .shared) {
+    init(authManager: any SyncAuthProviding = AuthManager.shared,
+         debounceNanoseconds: UInt64 = 1_500_000_000,
+         colorLedger: ColorEditLedger = .shared,
+         defaults: UserDefaults = .standard,
+         startPeriodicSync shouldStartPeriodicSync: Bool = true) {
         self.authManager = authManager
         self.colorLedger = colorLedger
+        self.defaults = defaults
         self.debounceNanoseconds = debounceNanoseconds
-        startPeriodicSync()
+        if shouldStartPeriodicSync {
+            startPeriodicSync()
+        }
+    }
+
+    deinit {
+        periodicTimer?.invalidate()
     }
 
     // MARK: - Periodic Sync
@@ -242,6 +252,18 @@ final class SyncEngine {
                 NotificationCenter.default.post(name: .requestModelContextSync, object: nil)
             }
         }
+    }
+
+    func stopPeriodicSync() {
+        periodicTimer?.invalidate()
+        periodicTimer = nil
+    }
+
+    func cancelPendingWork() {
+        stopPeriodicSync()
+        for task in debounceTasks.values { task.cancel() }
+        debounceTasks.removeAll()
+        debounceTokens.removeAll()
     }
 
     // MARK: - Full Sync (Pull + Push)
@@ -263,13 +285,12 @@ final class SyncEngine {
             _ = try await authManager.ensureAccountID()
             guard generation == authManager.sessionGeneration else { throw CancellationError() }
             let scope = try currentScope()
-            let token = try await authManager.getValidAccessToken()
+            let initialToken = try await authManager.getValidAccessToken()
             try validate(scope)
-            // 1. Pull remote changes
-            try await pullNotes(token: token, modelContext: modelContext, scope: scope)
-            // 2. Push pending local changes
-            try await pushPendingNotes(token: token, modelContext: modelContext, scope: scope)
-            _ = try await pushPendingDeletes(token: token, modelContext: modelContext, scope: scope)
+            // 1. Pull remote changes (returns refreshed token if a 401 refresh occurred mid-pull)
+            let activeToken = try await pullNotes(token: initialToken, modelContext: modelContext, scope: scope)
+            // 2. Push pending local changes (includes pending deletes before uploads)
+            try await pushPendingNotes(token: activeToken, modelContext: modelContext, scope: scope)
             try validate(scope)
             try ensureNoPendingWork(modelContext: modelContext, scope: scope)
 
@@ -284,14 +305,29 @@ final class SyncEngine {
         } catch {
             print("Sync failed: code=\((error as NSError).code)")
             let scope = try? currentScope()
-            incompleteTaskCount = max(1, scope.map { problemCount(modelContext: modelContext, scope: $0) } ?? 1)
+            let remaining = scope.flatMap { try? problemCount(modelContext: modelContext, scope: $0) }
+            incompleteTaskCount = max(1, remaining ?? 1)
             self.state = .error("尚有 \(incompleteTaskCount) 项未完成：" + error.localizedDescription)
         }
     }
 
     // MARK: - Pull Remote Notes
 
-    private func pullNotes(token: String, modelContext: ModelContext, scope: Scope, retryAuthOnFailure: Bool = true) async throws {
+    private static let maxPullPages = 100
+
+    private static func isValidGraphPageURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https",
+              url.host?.lowercased() == "graph.microsoft.com",
+              url.user == nil,
+              url.password == nil,
+              (url.port == nil || url.port == 443),
+              url.path.lowercased().hasPrefix("/v1.0/") else {
+            return false
+        }
+        return true
+    }
+
+    private func pullNotes(token: String, modelContext: ModelContext, scope: Scope, retryAuthOnFailure: Bool = true) async throws -> String {
         let pullStartTick = nextSyncTick()
         pullInProgress = true
         defer { finishPullGate() }
@@ -302,18 +338,23 @@ final class SyncEngine {
         let expandClause = "singleValueExtendedProperties($filter=id eq '\(lidId)' or id eq '\(webId)' or id eq '\(iconId)')"
         let encodedExpand = expandClause.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? expandClause
         let urlString = "\(graphEndpoint)/me/mailFolders/notes/messages?$top=100&$orderby=lastModifiedDateTime%20desc&$select=id,changeKey,subject,body,createdDateTime,lastModifiedDateTime&$expand=\(encodedExpand)"
-        guard let firstURL = URL(string: urlString) else { return }
+        guard let firstURL = URL(string: urlString) else { return token }
         var pageURL: URL? = firstURL
         var activeToken = token
         var didRetryAuth = !retryAuthOnFailure
         var messages: [[String: Any]] = []
+        var visitedPages: Set<String> = []
+        var pageCount = 0
 
         // Graph caps page size and returns @odata.nextLink. Process every page before applying
         // the pull so notes beyond the first 100 are imported and conflict decisions see a full set.
         while let url = pageURL {
             try validate(scope)
-            guard url.scheme == "https", url.host == "graph.microsoft.com" else {
+            guard Self.isValidGraphPageURL(url) else {
                 throw syncError(-22, "Graph 返回了无效的分页地址，已停止同步。")
+            }
+            guard pageCount < Self.maxPullPages else {
+                throw syncError(-22, "Graph 分页数量超过上限，已停止同步。")
             }
             var request = URLRequest(url: url)
             request.setValue("Bearer \(activeToken)", forHTTPHeaderField: "Authorization")
@@ -339,10 +380,15 @@ final class SyncEngine {
                   let pageMessages = json["value"] as? [[String: Any]] else {
                 throw syncError(-23, "Graph 返回了无法解析的便笺列表。")
             }
+            visitedPages.insert(url.absoluteString)
+            pageCount += 1
             messages.append(contentsOf: pageMessages)
             if let next = json["@odata.nextLink"] as? String {
-                guard let nextURL = URL(string: next) else {
+                guard let nextURL = URL(string: next), Self.isValidGraphPageURL(nextURL) else {
                     throw syncError(-22, "Graph 返回了无效的分页地址，已停止同步。")
+                }
+                guard !visitedPages.contains(nextURL.absoluteString) else {
+                    throw syncError(-22, "Graph 返回了循环分页地址，已停止同步。")
                 }
                 pageURL = nextURL
             } else {
@@ -360,8 +406,12 @@ final class SyncEngine {
         var skippedCloudCreates = 0
         var retiredIDs: Set<String> = []
         var localByRemoteId: [String: StickyNote] = [:]
+        var postSaveLedgerOps: [() -> Void] = []
         for note in localNotes where note.ownerAccountID == scope.accountID {
             retiredIDs.formUnion(note.pendingCleanupRemoteIDs)
+            if let pendingDeleteID = note.recoveryPendingDeleteID {
+                retiredIDs.insert(pendingDeleteID)
+            }
             if let rId = note.remoteId {
                 localByRemoteId[rId] = note
             }
@@ -455,8 +505,12 @@ final class SyncEngine {
                         // 网页原色保护：副本是新的云端对象。只有用户在本地选过的颜色才会写入；
                         // 否则只搬运缓存的云端 `_Note`（没有就不写）。主便笺随后取云端颜色，因此它自己的 dirty 标记不再适用。
                         let wasDirty = colorLedger.isDirty(localNote.id)
-                        if wasDirty { colorLedger.markDirty(copyNote.id) } else { colorLedger.markCarry(copyNote.id) }
-                        colorLedger.clearDirty(localNote.id)
+                        let copyID = copyNote.id
+                        let localID = localNote.id
+                        postSaveLedgerOps.append { [colorLedger] in
+                            if wasDirty { colorLedger.markDirty(copyID) } else { colorLedger.markCarry(copyID) }
+                            colorLedger.clearDirty(localID)
+                        }
                         ColorDiagnostics.guardDecision(path: "conflict-copy", remoteID: remoteId, dirty: wasDirty,
                                                        policy: wasDirty ? "writeLocal" : "carryCached")
 
@@ -486,15 +540,17 @@ final class SyncEngine {
                             cloudCopy.createdAt = remoteCreatedDate ?? Date()
                             cloudCopy.modifiedAt = remoteModifiedDate ?? Date()
                             modelContext.insert(cloudCopy)
-                            colorLedger.markCarry(cloudCopy.id)
+                            let cloudCopyID = cloudCopy.id
+                            postSaveLedgerOps.append { [colorLedger] in colorLedger.markCarry(cloudCopyID) }
                             ColorDiagnostics.guardDecision(path: "conflict-copy", remoteID: remoteId, dirty: false, policy: "carryCached", detail: "local-newer")
                             localNote.changeKey = changeKey
                         }
                         continue
                     }
                 } else {
-                    // 本地无未提交改动，用云端覆盖（云端颜色胜出；清除本地 dirty）
-                    colorLedger.clearDirty(localNote.id)
+                    // 本地无未提交改动，用云端覆盖（云端颜色胜出；保存成功后清除本地 dirty）
+                    let localID = localNote.id
+                    postSaveLedgerOps.append { [colorLedger] in colorLedger.clearDirty(localID) }
                     localNote.plainTextContent = plainText
                     let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
                     localNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
@@ -545,8 +601,11 @@ final class SyncEngine {
             debounceTasks[localNote.id]?.cancel()
             debounceTasks.removeValue(forKey: localNote.id)
             debounceTokens.removeValue(forKey: localNote.id)
-            colorLedger.clearDirty(localNote.id)
-            colorLedger.clearCarry(localNote.id)
+            let deletedID = localNote.id
+            postSaveLedgerOps.append { [colorLedger] in
+                colorLedger.clearDirty(deletedID)
+                colorLedger.clearCarry(deletedID)
+            }
             if !localNote.audioRecordings.isEmpty {
                 // Audio recordings are local-only; detach from cloud instead of destroying user voice memos.
                 localNote.remoteId = nil
@@ -561,7 +620,9 @@ final class SyncEngine {
 
         try validate(scope)
         try modelContext.save()
+        for op in postSaveLedgerOps { op() }
         skippedCloudCreateCount = skippedCloudCreates
+        return activeToken
     }
 
     // MARK: - Push Pending Local Notes
@@ -569,9 +630,12 @@ final class SyncEngine {
     private func healIncompleteSubstrateNotes(in modelContext: ModelContext, scope: Scope) {
         let descriptor = FetchDescriptor<StickyNote>()
         guard let notes = try? modelContext.fetch(descriptor) else { return }
-        var hasChanges = false
+        var healedNoteIDs: [UUID] = []
         for note in notes where note.ownerAccountID == scope.accountID {
-            if note.isDeletedLocally || note.isDeleted || note.recoveryPaused || note.recoveryPendingDeleteID != nil || note.hasCorruptSyncJournal { continue }
+            if note.isDeletedLocally || note.isDeleted || note.recoveryPaused ||
+                note.recoveryPendingDeleteID != nil || note.pendingCreateOperationID != nil ||
+                note.hasCorruptSyncJournal || note.hasCorruptRecoveryJournal ||
+                note.recoveryBlocksAutomaticRecreate || uploadingNoteIDs.contains(note.id) { continue }
             if note.remoteId != nil && NoteConverter.isLegacyMacAuthoredIncompleteNoteJSON(note.webNoteJSON) {
                 note.webNoteJSON = NoteConverter.webNoteJSON(
                     setting: note.noteColor,
@@ -580,13 +644,17 @@ final class SyncEngine {
                     localID: note.id,
                     modifiedAt: note.modifiedAt
                 )
-                colorLedger.markDirty(note.id)
                 note.syncStatus = .pendingUpload
-                hasChanges = true
+                healedNoteIDs.append(note.id)
             }
         }
-        if hasChanges {
-            try? modelContext.save()
+        if !healedNoteIDs.isEmpty {
+            do {
+                try modelContext.save()
+                for id in healedNoteIDs { colorLedger.markDirty(id) }
+            } catch {
+                // Leave ledger untouched if save fails
+            }
         }
     }
 
@@ -599,7 +667,7 @@ final class SyncEngine {
         let descriptor = FetchDescriptor<StickyNote>(
             predicate: #Predicate<StickyNote> { $0.syncStatusRaw == pendingStatus || $0.syncStatusRaw == errorStatus }
         )
-        let pendingNotes = (try? modelContext.fetch(descriptor)) ?? []
+        let pendingNotes = try modelContext.fetch(descriptor)
 
         var uploadFailures = 0
         for note in pendingNotes where note.ownerAccountID == scope.accountID {
@@ -725,7 +793,7 @@ final class SyncEngine {
             // PATCH /me/messages for non-draft notes. Recreate instead.
             if [400, 403, 404].contains(httpResponse.statusCode) {
                 guard !note.recoveryBlocksAutomaticRecreate else { throw syncError(-42, "关联对象更新失败；已禁止自动重建，请在待核对页明确确认。") }
-                try await replaceRemoteNote(note, token: token, scope: scope, payloadData: jsonData, uploadedHTML: html, snapshot: snapshot, plan: plan)
+                try await replaceRemoteNote(note, token: token, retryAuthOnFailure: retryAuthOnFailure, scope: scope, payloadData: jsonData, uploadedHTML: html, snapshot: snapshot, plan: plan)
                 return
             }
 
@@ -758,7 +826,7 @@ final class SyncEngine {
             }
 
             if [400, 403, 404].contains(httpResponse.statusCode) {
-                try await createNoteInMailFolder(note, token: token, scope: scope, payloadData: jsonData, uploadedHTML: html, snapshot: snapshot, plan: plan)
+                try await createNoteInMailFolder(note, token: token, retryAuthOnFailure: retryAuthOnFailure, scope: scope, payloadData: jsonData, uploadedHTML: html, snapshot: snapshot, plan: plan)
                 return
             }
 
@@ -777,16 +845,22 @@ final class SyncEngine {
 
     /// Mail.ReadWrite fallback: create a replacement note then delete the old one.
     /// PATCH /me/messages cannot persist body/subject on non-draft Outlook notes.
-    private func replaceRemoteNote(_ note: StickyNote, token: String, scope: Scope, payloadData: Data, uploadedHTML: String, snapshot: UploadSnapshot, plan suppliedPlan: ColorPlan) async throws {
+    private func replaceRemoteNote(_ note: StickyNote, token: String, retryAuthOnFailure: Bool = true, scope: Scope, payloadData: Data, uploadedHTML: String, snapshot: UploadSnapshot, plan suppliedPlan: ColorPlan) async throws {
         try requireUploadable(note, scope: scope)
         let oldId = note.remoteId
         var plan = suppliedPlan
         var payloadData = payloadData
+        var activeToken = token
+        var canRetryAuth = retryAuthOnFailure
         if plan.policy != .writeLocal, let oldId {
             // 用户没有改过颜色：替换对象必须把旧对象自己的颜色属性原封不动搬过来（此刻现读），绝不用本地（可能解错的）颜色。
-            let carried = await fetchServerColorProperties(remoteId: oldId, token: token, scope: scope)
+            let carried = await fetchServerColorProperties(remoteId: oldId, token: activeToken, retryAuthOnFailure: canRetryAuth, scope: scope)
             try validate(scope)
             if let carried {
+                if let refreshed = carried.refreshedToken {
+                    activeToken = refreshed
+                    canRetryAuth = false
+                }
                 payloadData = Self.replacingColorProperties(in: payloadData, with: carried.properties)
                 plan = ColorPlan(policy: .carryServer, carriedWebJSON: carried.webJSON)
                 ColorDiagnostics.guardDecision(path: "replace", remoteID: oldId, dirty: false, policy: "carryServer",
@@ -803,16 +877,16 @@ final class SyncEngine {
         } else {
             ColorDiagnostics.guardDecision(path: "replace", remoteID: oldId, dirty: true, policy: "writeLocal")
         }
-        try await createNoteInMailFolder(note, token: token, scope: scope, payloadData: payloadData, uploadedHTML: uploadedHTML, snapshot: snapshot, plan: plan)
+        try await createNoteInMailFolder(note, token: activeToken, retryAuthOnFailure: canRetryAuth, scope: scope, payloadData: payloadData, uploadedHTML: uploadedHTML, snapshot: snapshot, plan: plan)
         if let oldId {
             // finishUpload durably journaled oldId before it replaced remoteId.
-            try await performRemoteDelete(remoteId: oldId, token: token, scope: scope)
+            try await performRemoteDelete(remoteId: oldId, token: activeToken, scope: scope, retryAuthOnFailure: canRetryAuth)
             note.pendingCleanupRemoteIDs.removeAll { $0 == oldId }
             try saveDurably(note)
         }
     }
 
-    private func createNoteInMailFolder(_ note: StickyNote, token: String, scope: Scope, payloadData: Data, uploadedHTML: String, snapshot: UploadSnapshot, plan: ColorPlan) async throws {
+    private func createNoteInMailFolder(_ note: StickyNote, token: String, retryAuthOnFailure: Bool = true, scope: Scope, payloadData: Data, uploadedHTML: String, snapshot: UploadSnapshot, plan: ColorPlan) async throws {
         try requireUploadable(note, scope: scope)
         guard let url = URL(string: "\(graphEndpoint)/me/mailFolders/notes/messages") else {
             note.syncStatus = .error
@@ -820,6 +894,10 @@ final class SyncEngine {
         }
         let mailPayload = Self.mailFolderCreatePayload(from: payloadData)
         let (data, httpResponse) = try await sendCreate(note, url: url, token: token, body: mailPayload, scope: scope)
+        if httpResponse.statusCode == 401 && retryAuthOnFailure {
+            let newToken = try await refreshedToken(scope: scope)
+            return try await createNoteInMailFolder(note, token: newToken, retryAuthOnFailure: false, scope: scope, payloadData: payloadData, uploadedHTML: uploadedHTML, snapshot: snapshot, plan: plan)
+        }
         guard (200...299).contains(httpResponse.statusCode) else {
             note.syncStatus = .error
             let responseBody = "Graph request failed"
@@ -950,6 +1028,7 @@ final class SyncEngine {
         if unchanged { applyGraphTimestamps(json, to: note) }
         // 只缓存实际发出去的内容。没写过的颜色不能当成「云端已是这个色」；
         // 从云端原样搬来的颜色，继续保留云端自己的 `_Note`。
+        var shouldClearDirty = false
         switch plan.policy {
         case .writeLocal:
             note.webNoteJSON = NoteConverter.webNoteJSON(
@@ -960,17 +1039,19 @@ final class SyncEngine {
                 modifiedAt: snapshot.modified
             )
             // 若上传过程中用户又改了颜色，则保持 dirty。
-            if snapshot.color == note.noteColor { colorLedger.clearDirty(note.id) }
+            if snapshot.color == note.noteColor { shouldClearDirty = true }
         case .carryServer:
             if let web = plan.carriedWebJSON { note.webNoteJSON = web }
         case .omit, .carryCached:
             break
         }
-        colorLedger.clearCarry(note.id)
         note.syncStatus = unchanged ? .synced : .pendingUpload
         note.lastSyncedAt = Date()
         noteLastUploadedTick[note.id] = nextSyncTick()
         try saveDurably(note)
+        // Only mutate color ledger AFTER SwiftData persistence succeeds so ledger and store stay consistent.
+        if shouldClearDirty { colorLedger.clearDirty(note.id) }
+        colorLedger.clearCarry(note.id)
     }
 
     // MARK: - 网页原色保护
@@ -1051,7 +1132,7 @@ final class SyncEngine {
     }
 
     /// 只读：云端对象自己的颜色属性，值原封不动。`nil` 表示读失败（不得猜测）；空列表表示云端对象本来就没有颜色属性。
-    fileprivate func fetchServerColorProperties(remoteId: String, token: String, scope: Scope) async -> (properties: [[String: Any]], webJSON: String?)? {
+    fileprivate func fetchServerColorProperties(remoteId: String, token: String, retryAuthOnFailure: Bool = true, scope: Scope) async -> (properties: [[String: Any]], webJSON: String?, refreshedToken: String?)? {
         let lidId = NoteConverter.pidLidNoteColorPropertyId
         let webId = NoteConverter.webNoteJSONPropertyId
         let iconId = NoteConverter.pidTagIconIndexPropertyId
@@ -1061,10 +1142,20 @@ final class SyncEngine {
         // Include `body` in $select so Exchange reads the full item rather than truncating `_Note` at 255 chars.
         components.queryItems = [URLQueryItem(name: "$select", value: "id,body"), URLQueryItem(name: "$expand", value: clause)]
         guard let url = components.url else { return nil }
+        var activeToken = token
+        var didRefresh = false
         var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        guard let (data, response) = try? await scopedData(for: request, scope: scope),
-              (response as? HTTPURLResponse)?.statusCode == 200,
+        request.setValue("Bearer \(activeToken)", forHTTPHeaderField: "Authorization")
+        guard var (data, response) = try? await scopedData(for: request, scope: scope) else { return nil }
+        if (response as? HTTPURLResponse)?.statusCode == 401 && retryAuthOnFailure {
+            guard let refreshed = try? await refreshedToken(scope: scope) else { return nil }
+            activeToken = refreshed
+            didRefresh = true
+            request.setValue("Bearer \(activeToken)", forHTTPHeaderField: "Authorization")
+            guard let retryResult = try? await scopedData(for: request, scope: scope) else { return nil }
+            (data, response) = retryResult
+        }
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               json["id"] as? String == remoteId else { return nil }
         var out: [[String: Any]] = []
@@ -1075,7 +1166,7 @@ final class SyncEngine {
             else if NoteConverter.isPidLidNoteColorProperty(id) { out.append(["id": lidId, "value": value]) }
             else if NoteConverter.isPidTagIconIndexProperty(id) { out.append(["id": iconId, "value": value]) }
         }
-        return (out, web)
+        return (out, web, didRefresh ? activeToken : nil)
     }
 
     /// Mail-folder notes sort more reliably as IPM.StickyNote with current received/sent times.
@@ -1141,7 +1232,8 @@ final class SyncEngine {
                 predicate: #Predicate<StickyNote> { $0.id == noteID }
             )
             guard let note = try? modelContext.fetch(descriptor).first,
-                  note.ownerAccountID == scope.accountID, !note.isDeletedLocally, !note.recoveryPaused else { return }
+                  note.ownerAccountID == scope.accountID, !note.isDeletedLocally, !note.recoveryPaused,
+                  !isUntouchedBlankNewNote(note) else { return }
 
             do {
                 try validate(scope)
@@ -1173,7 +1265,7 @@ final class SyncEngine {
                 if !note.isDeleted && !note.isDeletedLocally &&
                     !(note.syncStatus == .synced && !note.pendingCleanupRemoteIDs.isEmpty) { note.syncStatus = .error }
                 try? modelContext.save()
-                incompleteTaskCount = max(1, problemCount(modelContext: modelContext, scope: scope))
+                incompleteTaskCount = max(1, (try? problemCount(modelContext: modelContext, scope: scope)) ?? 1)
                 self.state = .error("尚有 \(incompleteTaskCount) 项未完成：" + error.localizedDescription)
             }
         }
@@ -1199,10 +1291,10 @@ final class SyncEngine {
         let allowImmediateDelete = canSendImmediateRemoteDelete(note)
 
         if note.requiresRemoteCleanup {
-            if remoteId != nil && allowImmediateDelete {
+            if let remoteId, allowImmediateDelete {
                 note.syncStatus = .pendingUpload
                 try? modelContext.save()
-                deleteRemoteNoteAndCleanup(noteID: noteID, remoteId: remoteId!, ownerAccountID: ownerAccountID, modelContext: modelContext)
+                deleteRemoteNoteAndCleanup(noteID: noteID, remoteId: remoteId, ownerAccountID: ownerAccountID, modelContext: modelContext)
             } else {
                 // Keep tombstone durable for pushPendingDeletes / Recovery Review; do NOT send raw DELETE
                 // while an uncertain POST, recovery pause, or corrupt journal protects the cloud object.
@@ -1297,17 +1389,18 @@ final class SyncEngine {
         }
         return note.isDeletedLocally || note.syncStatus != .synced || !note.pendingCleanupRemoteIDs.isEmpty
     }
-    private func problemCount(modelContext: ModelContext, scope: Scope) -> Int {
-        let notes = (try? modelContext.fetch(FetchDescriptor<StickyNote>())) ?? []
+    private func problemCount(modelContext: ModelContext, scope: Scope) throws -> Int {
+        let notes = try modelContext.fetch(FetchDescriptor<StickyNote>())
         return notes.filter { $0.ownerAccountID == scope.accountID && isProblem($0) }.count
     }
     private func ensureNoPendingWork(modelContext: ModelContext, scope: Scope) throws {
         try validate(scope)
-        let count = problemCount(modelContext: modelContext, scope: scope)
+        let notes = try modelContext.fetch(FetchDescriptor<StickyNote>())
+        let accountNotes = notes.filter { $0.ownerAccountID == scope.accountID }
+        let count = accountNotes.filter { isProblem($0) }.count
         incompleteTaskCount = count
         if count > 0 {
-            let corrupt = ((try? modelContext.fetch(FetchDescriptor<StickyNote>())) ?? [])
-                .filter { $0.ownerAccountID == scope.accountID && $0.hasCorruptSyncJournal }.count
+            let corrupt = accountNotes.filter { $0.hasCorruptSyncJournal }.count
             var message = "仍有 \(count) 项本地改动、删除或恢复问题未完成。"
             if corrupt > 0 { message += "其中 \(corrupt) 条便笺的同步日志损坏，已单独隔离（不上传、不删除、不覆盖），其余便笺照常同步。" }
             if corrupt > 0 && skippedCloudCreateCount > 0 { message += "另有 \(skippedCloudCreateCount) 条云端新便笺暂未导入。" }
@@ -1419,11 +1512,19 @@ final class SyncEngine {
     /// Fresh /me verification, not just a cached display name or email comparison.
     private func freshRecoveryToken(_ note: StickyNote, scope: Scope) async throws -> String {
         try checkRecovery(note, scope: scope)
-        let token = try await authManager.getValidAccessToken()
+        var token = try await authManager.getValidAccessToken()
         try validate(scope)
-        var request = URLRequest(url: URL(string: "\(graphEndpoint)/me?$select=id")!)
+        guard let meURL = URL(string: "\(graphEndpoint)/me?$select=id") else {
+            throw syncError(-44, "无法构造身份核验请求。")
+        }
+        var request = URLRequest(url: meURL)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await scopedData(for: request, scope: scope)
+        var (data, response) = try await scopedData(for: request, scope: scope)
+        if (response as? HTTPURLResponse)?.statusCode == 401 {
+            token = try await refreshedToken(scope: scope)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            (data, response) = try await scopedData(for: request, scope: scope)
+        }
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               json["id"] as? String == scope.accountID else {
@@ -1433,16 +1534,31 @@ final class SyncEngine {
         return token
     }
     private func readRecoveryCandidate(_ note: StickyNote, id: String, kind: RecoveryRemoteKind,
-                                       scope: Scope, token: String, allowPreviouslyVerifiedMissing: Bool = false) async throws -> VerifiedRecoveryCandidate {
+                                       scope: Scope, token: String, retryAuthOnFailure: Bool = true,
+                                       allowPreviouslyVerifiedMissing: Bool = false) async throws -> VerifiedRecoveryCandidate {
         let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let url = graphItemURL(collection: kind.collection, id: trimmed) else { throw syncError(-45, "请输入完整远端对象 ID。") }
-        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        guard !trimmed.isEmpty,
+              let url = graphItemURL(collection: kind.collection, id: trimmed),
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            throw syncError(-45, "请输入完整远端对象 ID。")
+        }
         if kind == .mailNote {
             components.queryItems = [URLQueryItem(name: "$expand", value: "singleValueExtendedProperties($filter=id eq 'String 0x001A' or id eq '\(NoteConverter.webNoteJSONPropertyId)')")]
+        } else {
+            components.queryItems = [URLQueryItem(name: "$expand", value: "singleValueExtendedProperties($filter=id eq '\(NoteConverter.webNoteJSONPropertyId)')")]
         }
-        var request = URLRequest(url: components.url!)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await scopedData(for: request, scope: scope)
+        guard let finalURL = components.url else {
+            throw syncError(-45, "请输入完整远端对象 ID。")
+        }
+        var activeToken = token
+        var request = URLRequest(url: finalURL)
+        request.setValue("Bearer \(activeToken)", forHTTPHeaderField: "Authorization")
+        var (data, response) = try await scopedData(for: request, scope: scope)
+        if (response as? HTTPURLResponse)?.statusCode == 401 && retryAuthOnFailure {
+            activeToken = try await refreshedToken(scope: scope)
+            request.setValue("Bearer \(activeToken)", forHTTPHeaderField: "Authorization")
+            (data, response) = try await scopedData(for: request, scope: scope)
+        }
         try checkRecovery(note, scope: scope)
         let status = (response as? HTTPURLResponse)?.statusCode
         let durableDelete = note.recoveryPendingDeleteID == trimmed && note.recoveryPendingDeleteKindRaw == kind.rawValue
@@ -1465,7 +1581,10 @@ final class SyncEngine {
         } else if let type = json["@odata.type"] as? String, type.lowercased() != "#microsoft.graph.note" {
             throw syncError(-45, "候选资源类型不是 Graph note。")
         }
-        let webJSON = properties.first { $0["id"] as? String == NoteConverter.webNoteJSONPropertyId }?["value"] as? String
+        let webJSON = properties.first {
+            guard let propID = $0["id"] as? String else { return false }
+            return NoteConverter.isWebNoteJSONProperty(propID)
+        }?["value"] as? String
         return VerifiedRecoveryCandidate(sourceID: note.id, accountID: scope.accountID, generation: scope.generation,
             recoveryVersion: note.recoveryVersion, operationID: note.pendingCreateOperationID, wasDeleted: note.isDeletedLocally,
             id: trimmed, kind: kind, exists: true, changeKey: key, html: html, webNoteJSON: webJSON)
@@ -1553,9 +1672,8 @@ final class SyncEngine {
         guard !note.isDeleted else { throw syncError(-43, "本地记录已移除。") }
         try requireOwner(note, scope: scope)
         // Export is read-only and allowed even if a journal cannot be parsed; raw journal bytes
-        // are added separately so corruption is not silently lost.
-        let json = try LocalExporter.noteObject(note)
-        return try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        // are included separately so corruption is not silently lost.
+        return try LocalExporter.encodeNote(note)
     }
 
     func restoreRecoveryLocalOnly(_ note: StickyNote, reason: String, acknowledged: Bool) async throws {
@@ -1627,10 +1745,19 @@ final class SyncEngine {
         let actionVersion = note.recoveryVersion
         try context.save() // explicit authorization/intention survives lost DELETE response
         if fresh.exists {
-            var request = URLRequest(url: graphItemURL(collection: fresh.kind.collection, id: fresh.id)!)
+            guard let deleteURL = graphItemURL(collection: fresh.kind.collection, id: fresh.id) else {
+                throw syncError(-45, "远端对象 ID 无效，已拒绝删除。")
+            }
+            var activeToken = token
+            var request = URLRequest(url: deleteURL)
             request.httpMethod = "DELETE"
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            let (_, response) = try await scopedData(for: request, scope: scope)
+            request.setValue("Bearer \(activeToken)", forHTTPHeaderField: "Authorization")
+            var (_, response) = try await scopedData(for: request, scope: scope)
+            if (response as? HTTPURLResponse)?.statusCode == 401 {
+                activeToken = try await refreshedToken(scope: scope)
+                request.setValue("Bearer \(activeToken)", forHTTPHeaderField: "Authorization")
+                (_, response) = try await scopedData(for: request, scope: scope)
+            }
             guard let status = (response as? HTTPURLResponse)?.statusCode, (200...299).contains(status) || status == 404 else {
                 throw syncError(-47, "删除结果未确认：保留精确 ID 和授权记录，不会自动重发；请重新核对。")
             }
@@ -1693,6 +1820,12 @@ final class SyncEngine {
     func allowReplacementSync(_ note: StickyNote, reason: String, acknowledged: Bool) throws {
         let scope = try currentScope()
         let text = try requireRecoveryConfirmation(reason, acknowledged: acknowledged)
+        guard !note.isDeleted, !note.isDeletedLocally else {
+            throw syncError(-43, "本地记录已删除，无法解除禁止自动重建标记。")
+        }
+        guard !uploadingNoteIDs.contains(note.id) else {
+            throw syncError(-46, "此便笺正在上传中，请稍后再操作。")
+        }
         try requireOwner(note, scope: scope)
         guard note.recoveryBlocksAutomaticRecreate else { throw syncError(-46, "此便笺没有「禁止自动重建」标记。") }
         guard note.pendingCreateOperationID == nil, note.recoveryPendingDeleteID == nil,
@@ -1708,9 +1841,20 @@ final class SyncEngine {
     // MARK: - Graph URL Helpers
 
     private func graphItemURL(collection: String, id: String) -> URL? {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed != ".",
+              trimmed != "..",
+              !trimmed.contains("/"),
+              !trimmed.contains("\\"),
+              !trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            return nil
+        }
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "-._~")
-        let encoded = id.addingPercentEncoding(withAllowedCharacters: allowed) ?? id
+        guard let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: allowed), !encoded.isEmpty else {
+            return nil
+        }
         return URL(string: "\(graphEndpoint)/\(collection)/\(encoded)")
     }
 

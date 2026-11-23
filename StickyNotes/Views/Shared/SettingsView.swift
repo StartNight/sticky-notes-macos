@@ -9,10 +9,15 @@ struct SettingsView: View {
 
     @State private var authManager = AuthManager.shared
     @State private var syncEngine = SyncEngine.shared
-    @State private var isSigningIn = false
     @State private var errorMessage: String? = nil
-    @State private var isSyncing = false
     @State private var showRecovery = false
+
+    private var normalizedDefaultColor: Binding<String> {
+        Binding(
+            get: { NoteColor.fromPersisted(defaultColor).rawValue },
+            set: { defaultColor = $0 }
+        )
+    }
 
     var body: some View {
         TabView {
@@ -32,6 +37,12 @@ struct SettingsView: View {
                 }
         }
         .frame(width: 520, height: 460)
+        .onAppear {
+            let normalized = NoteColor.fromPersisted(defaultColor).rawValue
+            if defaultColor != normalized {
+                defaultColor = normalized
+            }
+        }
         .sheet(isPresented: $showRecovery) { RecoveryReviewView().modelContainer(modelContext.container) }
     }
 
@@ -39,7 +50,7 @@ struct SettingsView: View {
 
     private var generalTab: some View {
         Form {
-            Picker(String(localized: "Default note color"), selection: $defaultColor) {
+            Picker(String(localized: "Default note color"), selection: normalizedDefaultColor) {
                 ForEach(NoteColor.allCases, id: \.self) { color in
                     HStack {
                         Circle()
@@ -86,6 +97,7 @@ struct SettingsView: View {
                         Spacer()
 
                         Button(String(localized: "Sign Out")) {
+                            errorMessage = nil
                             authManager.signOut()
                             syncEngine.resetForSignOut()
                         }
@@ -95,7 +107,7 @@ struct SettingsView: View {
 
                 Section(String(localized: "Synchronization")) {
                     Button(String(localized: "Recovery review (including deleted notes)")) { showRecovery = true }
-                        .disabled(authManager.accountID == nil)
+                        .disabled(!authManager.isIdentityVerified || authManager.accountID == nil)
                     Text(String(localized: "Notes from other accounts, no-account notes and legacy unowned notes are hidden here and never uploaded to this account. Manage them under Local Data."))
                         .font(.caption).foregroundStyle(.secondary)
                     HStack {
@@ -103,12 +115,12 @@ struct SettingsView: View {
                             Text(syncEngine.state.displayText)
                         } icon: {
                             Image(systemName: syncEngine.state.systemImage)
-                                .foregroundStyle(syncEngine.state == .idle ? .green : .orange)
+                                .foregroundStyle(syncEngine.state.statusColor)
                         }
 
                         Spacer()
 
-                        if isSyncing {
+                        if syncEngine.state == .syncing {
                             ProgressView()
                                 .controlSize(.small)
                         } else {
@@ -147,7 +159,7 @@ struct SettingsView: View {
                                 startSignIn()
                             } label: {
                                 HStack {
-                                    if isSigningIn {
+                                    if authManager.isAuthenticating {
                                         ProgressView()
                                             .controlSize(.small)
                                     } else {
@@ -157,7 +169,7 @@ struct SettingsView: View {
                                 }
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(isSigningIn)
+                            .disabled(authManager.isAuthenticating)
 
                             Spacer()
                         }
@@ -176,6 +188,12 @@ struct SettingsView: View {
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                         Spacer()
+                        Button(String(localized: "Reset Defaults")) {
+                            authManager.resetOAuthConfiguration()
+                        }
+                        .buttonStyle(.link)
+                        .font(.system(size: 11))
+                        .disabled(authManager.isAuthenticated || authManager.isAuthenticating)
                     }
                     TextField(String(localized: "Client ID"), text: Binding(
                         get: { authManager.clientId },
@@ -183,6 +201,7 @@ struct SettingsView: View {
                     ))
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 11, design: .monospaced))
+                    .disabled(authManager.isAuthenticated || authManager.isAuthenticating)
 
                     HStack {
                         Text(String(localized: "Redirect URI:"))
@@ -196,6 +215,7 @@ struct SettingsView: View {
                     ))
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 11, design: .monospaced))
+                    .disabled(authManager.isAuthenticated || authManager.isAuthenticating)
                 }
             }
         }
@@ -204,26 +224,22 @@ struct SettingsView: View {
     }
 
     private func startSignIn() {
-        isSigningIn = true
+        guard !authManager.isAuthenticating else { return }
         errorMessage = nil
         Task {
             do {
                 try await authManager.signIn()
-                isSigningIn = false
                 triggerManualSync()
             } catch {
-                isSigningIn = false
                 errorMessage = error.localizedDescription
             }
         }
     }
 
     private func triggerManualSync() {
-        guard !isSyncing else { return }
-        isSyncing = true
+        guard syncEngine.state != .syncing else { return }
         Task {
             await syncEngine.syncAll(modelContext: modelContext)
-            isSyncing = false
         }
     }
 }

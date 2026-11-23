@@ -220,9 +220,19 @@ struct NoteConverter {
         id.lowercased().contains("0x1080")
     }
 
+    private static let isoFormatterFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
     static func isWebNoteJSONProperty(_ id: String) -> Bool {
-        let lower = id.lowercased().replacingOccurrences(of: "  ", with: " ")
-        return lower.contains("name _note")
+        let collapsed = id
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        return collapsed.hasSuffix("name _note")
     }
 
     /// Icon index corresponding to note color (MS-OXONOTE 2.2.1.2: 0x300 + PidLidNoteColor).
@@ -275,17 +285,25 @@ struct NoteConverter {
         return true
     }
 
+    private static func isJSONBoolean(_ value: Any?) -> Bool {
+        guard let value else { return false }
+        return CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID()
+    }
+
     static func noteColor(fromWebNoteJSON json: String) -> NoteColor? {
         guard let data = json.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
         let code: Int?
-        if let value = obj["color"] as? Int {
+        let rawColor = obj["color"]
+        if isJSONBoolean(rawColor) {
+            code = nil
+        } else if let value = rawColor as? Int {
             code = value
-        } else if let value = obj["color"] as? NSNumber {
+        } else if let value = rawColor as? NSNumber {
             code = value.intValue
-        } else if let value = obj["color"] as? String {
+        } else if let value = rawColor as? String {
             code = Int(value)
         } else {
             code = nil
@@ -315,16 +333,14 @@ struct NoteConverter {
             obj["schemaVersion"] = "beta"
         }
 
-        let isMacAuthoredDocument = (obj["createdByApp"] as? String) == "StickyNotes"
+        let createdByStickyNotes = (obj["createdByApp"] as? String) == "StickyNotes"
+        let matchesThisLocalNote = localID != nil && (obj["createdWithLocalId"] as? String)?.lowercased() == localID?.uuidString.lowercased()
+        let isMacAuthoredDocument = createdByStickyNotes && (matchesThisLocalNote || obj["document"] == nil)
         if obj["document"] == nil || (plainText != nil && isMacAuthoredDocument) {
             obj["document"] = substrateDocument(for: plainText ?? "")
-            let iso = ISO8601DateFormatter()
-            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            obj["documentModifiedAt"] = iso.string(from: modifiedAt)
+            obj["documentModifiedAt"] = isoFormatterFractional.string(from: modifiedAt)
         } else if obj["documentModifiedAt"] == nil {
-            let iso = ISO8601DateFormatter()
-            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            obj["documentModifiedAt"] = iso.string(from: modifiedAt)
+            obj["documentModifiedAt"] = isoFormatterFractional.string(from: modifiedAt)
         }
         if obj["documentModifiedAt@Is.Queryable"] == nil { obj["documentModifiedAt@Is.Queryable"] = "True" }
         if obj["#type.documentModifiedAt"] == nil { obj["#type.documentModifiedAt"] = "DateTime" }
@@ -421,23 +437,29 @@ struct NoteConverter {
     }
 
     /// 仅用于诊断：颜色判定所依据的原始线上值（不改变行为）。
-    /// `source` 表示由哪个字段决定颜色："_Note" | "0x8B00" | "default(yellow)"。
+    /// `source` 表示由哪个字段决定颜色："_Note" | "0x8B00" | "0x1080" | "default(yellow)"。
     static func rawColorCodes(fromExtendedProperties props: [[String: Any]]) -> (webCode: Int?, lidCode: Int?, source: String) {
         var web: Int?
         var lid: Int?
+        var icon: Int?
         for prop in props {
             guard let propId = prop["id"] as? String, let value = prop["value"] as? String else { continue }
             if isWebNoteJSONProperty(propId) {
                 if let data = value.data(using: .utf8), let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    if let v = obj["color"] as? Int { web = v }
-                    else if let v = obj["color"] as? NSNumber { web = v.intValue }
-                    else if let v = obj["color"] as? String { web = Int(v) }
+                    let raw = obj["color"]
+                    if !isJSONBoolean(raw) {
+                        if let v = raw as? Int { web = v }
+                        else if let v = raw as? NSNumber { web = v.intValue }
+                        else if let v = raw as? String { web = Int(v) }
+                    }
                 }
             } else if isPidLidNoteColorProperty(propId) {
                 lid = Int(value)
+            } else if isPidTagIconIndexProperty(propId) {
+                icon = Int(value)
             }
         }
-        let source = web != nil ? "_Note" : (lid != nil ? "0x8B00" : "default(yellow)")
+        let source = web != nil ? "_Note" : (lid != nil ? "0x8B00" : (icon != nil ? "0x1080" : "default(yellow)"))
         return (web, lid, source)
     }
 

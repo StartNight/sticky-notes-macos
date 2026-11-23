@@ -44,6 +44,17 @@ while IFS= read -r item; do
   sign "$item" "$id"
 done < <(find "$APP/Contents" \( -name "*.framework" -o -name "*.appex" -o -name "*.xpc" -o -name "*.dylib" -o -name "*.so" -o -name "*.bundle" -o -name "*.plugin" -o -name "*.app" \) -not -path "$APP" | awk '{print length, $0}' | sort -rn | cut -d' ' -f2-)
 
+# Sign any extra standalone Mach-O helpers under Contents/MacOS besides the main executable.
+while IFS= read -r helper; do
+  [ -z "$helper" ] && continue
+  [ "$helper" = "$MAIN_EXEC" ] && continue
+  if file "$helper" | grep -Fq "Mach-O"; then
+    id="$BUNDLE_ID.$(basename "$helper" | sed 's/[^A-Za-z0-9.-]/-/g')"
+    echo "signing helper: $helper ($id)"
+    sign "$helper" "$id"
+  fi
+done < <(find "$APP/Contents/MacOS" -maxdepth 1 -type f 2>/dev/null)
+
 # 2) Main app last, with entitlements (no get-task-allow) and Hardened Runtime.
 echo "signing main: $APP ($BUNDLE_ID)"
 sign "$APP" "$BUNDLE_ID" --entitlements "$ENT"

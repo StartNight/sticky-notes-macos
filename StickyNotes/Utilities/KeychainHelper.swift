@@ -4,7 +4,7 @@ import Security
 /// Injectable SecItem boundary. Tests never use the application's credential service.
 /// `dataProtection` is kept for source compatibility; production always passes `false`
 /// (the data-protection keychain needs an entitlement this build cannot have).
-protocol KeychainBackend {
+protocol KeychainBackend: Sendable {
     func copy(account: String, dataProtection: Bool, interactive: Bool) -> (OSStatus, Data?)
     func write(account: String, data: Data, dataProtection: Bool) -> OSStatus
     func delete(account: String, dataProtection: Bool) -> OSStatus
@@ -121,8 +121,9 @@ final class KeychainHelper: @unchecked Sendable {
 
     /// Safe diagnostics: operation/status/cumulative counts ONLY, never values or identity.
     private func record(_ operation: String, status: OSStatus) {
+        let (reads, writes, deletes) = withState { (_copyCount, _writeCount, _deleteCount) }
         NSLog("AUTH_KEYCHAIN op=%@ status=%d result=%@ reads=%d writes=%d deletes=%d",
-              operation, status, String(describing: KeychainProbe.classify(status)), copyMatchingCallCount, writeCallCount, deleteCallCount)
+              operation, status, String(describing: KeychainProbe.classify(status)), reads, writes, deletes)
     }
     private func copy(_ account: String, interactive: Bool) -> (OSStatus, Data?) {
         withState { _copyCount += 1 }

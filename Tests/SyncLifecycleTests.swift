@@ -8,21 +8,28 @@ final class SyncLifecycleTests: XCTestCase {
     private var container: ModelContainer!
     private var context: ModelContext { container.mainContext }
     private var engine: SyncEngine!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
     override func setUp() async throws {
         MockURLProtocol.reset()
         URLProtocol.registerClass(MockURLProtocol.self)
         SyncAuthStub.shared.reset()
         let schema = Schema([StickyNote.self])
         container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
-        engine = SyncEngine(authManager: SyncAuthStub.shared, debounceNanoseconds: 1_000_000)
+        suiteName = "sync-lifecycle-" + UUID().uuidString
+        defaults = UserDefaults(suiteName: suiteName)!
+        engine = SyncEngine(authManager: SyncAuthStub.shared, debounceNanoseconds: 1_000_000,
+                            colorLedger: ColorEditLedger(defaults: defaults), defaults: defaults, startPeriodicSync: false)
         engine.lastSyncDate = nil
     }
     override func tearDown() async throws {
+        engine?.cancelPendingWork()
         // Every held test request must be explicitly completed, not leaked into another test.
         XCTAssertEqual(MockURLProtocol.heldCount, 0)
         MockURLProtocol.reset()
         URLProtocol.unregisterClass(MockURLProtocol.self)
-        container = nil; engine = nil
+        if let suiteName { UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName) }
+        container = nil; engine = nil; defaults = nil; suiteName = nil
     }
     private func waitUntil(_ predicate: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
         for _ in 0..<400 {
@@ -157,7 +164,9 @@ final class SyncLifecycleTests: XCTestCase {
         SyncAuthStub.shared.accountID = "test-account"; SyncAuthStub.shared.sessionGeneration = UUID()
         MockURLProtocol.holdMethods = []
         MockURLProtocol.handler = { _ in .http(status: 200, json: ["value": [self.remote("server-created", "uncertain-local")]]) }
-        let restarted = SyncEngine(authManager: SyncAuthStub.shared)
+        let restarted = SyncEngine(authManager: SyncAuthStub.shared,
+                                   colorLedger: ColorEditLedger(defaults: defaults), defaults: defaults, startPeriodicSync: false)
+        defer { restarted.cancelPendingWork() }
         await restarted.syncAll(modelContext: reloadedContext)
         XCTAssertEqual(MockURLProtocol.requests.filter { $0.method == "POST" }.count, 1, "不能把client-request-id误当服务端幂等保证")
         XCTAssertEqual(reloaded.plainTextContent, "uncertain-local")
@@ -171,7 +180,10 @@ final class SyncLifecycleTests: XCTestCase {
         do { try await engine.uploadNote(local, token: "fake"); XCTFail() } catch {}
         XCTAssertNotNil(local.pendingCreateOperationID)
         let reloaded = try XCTUnwrap(ModelContext(container).fetch(FetchDescriptor<StickyNote>()).first)
-        do { try await SyncEngine(authManager: SyncAuthStub.shared).uploadNote(reloaded, token: "fake"); XCTFail() } catch {
+        let restarted = SyncEngine(authManager: SyncAuthStub.shared,
+                                   colorLedger: ColorEditLedger(defaults: defaults), defaults: defaults, startPeriodicSync: false)
+        defer { restarted.cancelPendingWork() }
+        do { try await restarted.uploadNote(reloaded, token: "fake"); XCTFail() } catch {
             XCTAssertEqual((error as NSError).code, -30)
         }
         XCTAssertEqual(MockURLProtocol.requests.count, 1)
@@ -263,7 +275,9 @@ final class SyncLifecycleTests: XCTestCase {
         XCTAssertEqual(restored.pendingCleanupRemoteIDs, ["old-object"])
         MockURLProtocol.reset()
         MockURLProtocol.handler = { req in req.httpMethod == "GET" ? .http(status: 200, json: ["value": [self.remote("old-object")]]) : .http(status: 204, json: nil) }
-        let restarted = SyncEngine(authManager: SyncAuthStub.shared)
+        let restarted = SyncEngine(authManager: SyncAuthStub.shared,
+                                   colorLedger: ColorEditLedger(defaults: defaults), defaults: defaults, startPeriodicSync: false)
+        defer { restarted.cancelPendingWork() }
         await restarted.syncAll(modelContext: newContext)
         XCTAssertEqual(MockURLProtocol.requests.map(\.method), ["GET", "DELETE"])
         XCTAssertTrue(restored.pendingCleanupRemoteIDs.isEmpty)

@@ -7,19 +7,26 @@ final class RecoveryWorkflowTests: XCTestCase {
     private var container: ModelContainer!
     private var context: ModelContext { container.mainContext }
     private var engine: SyncEngine!
+    private var suiteName: String!
+    private var defaults: UserDefaults!
     private let evidence = "fake test: exact original account / exact object manually reviewed"
     override func setUp() async throws {
         MockURLProtocol.reset(); URLProtocol.registerClass(MockURLProtocol.self)
         SyncAuthStub.shared.reset()
         let schema = Schema([StickyNote.self])
         container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
-        engine = SyncEngine(authManager: SyncAuthStub.shared, debounceNanoseconds: 1_000_000)
+        suiteName = "recovery-tests-" + UUID().uuidString
+        defaults = UserDefaults(suiteName: suiteName)!
+        engine = SyncEngine(authManager: SyncAuthStub.shared, debounceNanoseconds: 1_000_000,
+                            colorLedger: ColorEditLedger(defaults: defaults), defaults: defaults, startPeriodicSync: false)
         engine.lastSyncDate = nil
     }
     override func tearDown() async throws {
+        engine?.cancelPendingWork()
         XCTAssertEqual(MockURLProtocol.heldCount, 0)
         MockURLProtocol.reset(); URLProtocol.unregisterClass(MockURLProtocol.self)
-        container = nil; engine = nil
+        if let suiteName { UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName) }
+        container = nil; engine = nil; defaults = nil; suiteName = nil
     }
     private func source(deleted: Bool = false) -> StickyNote {
         let n = StickyNote(color: .purple, content: "local-newer", ownerAccountID: "test-account")
@@ -294,7 +301,9 @@ final class RecoveryWorkflowTests: XCTestCase {
         MockURLProtocol.handler = { request in
             request.url!.path == "/v1.0/me" ? .http(status: 200, json: ["id": "test-account"]) : .http(status: 404, json: [:])
         }
-        let restarted = SyncEngine(authManager: SyncAuthStub.shared)
+        let restarted = SyncEngine(authManager: SyncAuthStub.shared,
+                                   colorLedger: ColorEditLedger(defaults: defaults), defaults: defaults, startPeriodicSync: false)
+        defer { restarted.cancelPendingWork() }
         let absent = try await restarted.verifyRecoveryCandidate(restored, id: "candidate", kind: .graphNote)
         XCTAssertFalse(absent.exists)
         try await restarted.confirmRecoveryCandidate(restored, candidate: absent, action: .deleteCandidate, reason: evidence, acknowledged: true)

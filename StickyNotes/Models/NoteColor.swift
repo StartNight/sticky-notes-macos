@@ -23,8 +23,7 @@ enum NoteColor: String, CaseIterable, Codable {
 
     // MARK: - Official Microsoft Sticky Notes swatches
     // Body / header colors sampled from the official Windows Sticky Notes
-    // app (Microsoft Store screenshots + published Windows 3.x/4.x palette:
-    // yellow body #FFF394). Outlook on the web renders the same seven named
+    // app (yellow body #FFF4B9). Outlook on the web renders the same seven named
     // colors; we keep picker order 黄/绿/粉/紫/蓝/灰/炭笔.
 
     /// Note body hex in light mode (sRGB), matching the official Windows app.
@@ -67,9 +66,5 @@ enum NoteColor: String, CaseIterable, Codable {
 
     func toolbarColor(for colorScheme: ColorScheme) -> Color {
         colorScheme == .dark ? darkToolbar : toolbar
-    }
-
-    func listCardColor(for colorScheme: ColorScheme) -> Color {
-        backgroundColor(for: colorScheme).opacity(0.85)
     }
 }

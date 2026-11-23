@@ -12,13 +12,19 @@ final class FakeClock {
 final class AuthManagerTests: XCTestCase {
     private var defaults: UserDefaults!
     private var suite: String!
+    private var mockSession: URLSession!
     override func setUp() async throws {
         suite = "StickyNotes.AuthTests." + UUID().uuidString
         defaults = UserDefaults(suiteName: suite)!
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        mockSession = URLSession(configuration: config)
         MockURLProtocol.reset()
         URLProtocol.registerClass(MockURLProtocol.self)
     }
     override func tearDown() async throws {
+        mockSession?.invalidateAndCancel()
+        mockSession = nil
         URLProtocol.unregisterClass(MockURLProtocol.self)
         MockURLProtocol.reset()
         defaults.removePersistentDomain(forName: suite)
@@ -30,7 +36,7 @@ final class AuthManagerTests: XCTestCase {
         return store
     }
     func testAuthorizationURLAlwaysSelectsAccountAndUsesEphemeralSession() throws {
-        let auth = AuthManager(keychain: KeychainHelper(inMemoryOnly: true), defaults: defaults, loadStoredAuth: false)
+        let auth = AuthManager(keychain: KeychainHelper(inMemoryOnly: true), defaults: defaults, network: mockSession, loadStoredAuth: false)
         let url = try auth.authorizationURL(state: "fake-state", challenge: "fake-challenge")
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!
         XCTAssertEqual(items.first { $0.name == "prompt" }?.value, "select_account")
@@ -41,7 +47,7 @@ final class AuthManagerTests: XCTestCase {
     }
     func testSignOutClearsMemoryIdentityAndSurvivesRelaunch() async {
         let store = seededStore()
-        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: store, defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         XCTAssertTrue(auth.isAuthenticated)
         let generation = auth.sessionGeneration
         auth.signOut()
@@ -52,7 +58,7 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertNil(store.readString(key: "ms_refresh_token"))
         XCTAssertNil(store.readString(key: "ms_graph_account_id"))
         await auth.waitForKeychainWork()
-        let reopened = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        let reopened = AuthManager(keychain: store, defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         XCTAssertFalse(reopened.isAuthenticated)
     }
     func testFailedDeletionStillSuppressesAutomaticRestoreWithoutReadingCredentials() async {
@@ -60,11 +66,11 @@ final class AuthManagerTests: XCTestCase {
         backend.seed(["ms_access_token": "fake-access", "ms_graph_account_id": "fake-A"])
         backend.deleteStatus = errSecAuthFailed
         let store = KeychainHelper(backend: backend)
-        let auth = AuthManager(keychain: store, defaults: defaults, loadStoredAuth: false)
+        let auth = AuthManager(keychain: store, defaults: defaults, network: mockSession, loadStoredAuth: false)
         auth.signOut()
         await auth.waitForKeychainWork()
         XCTAssertNotNil(auth.lastAuthError)
-        let reopened = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let reopened = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         XCTAssertFalse(reopened.isAuthenticated)
         XCTAssertEqual(backend.reads.count, 0)
     }
@@ -72,7 +78,7 @@ final class AuthManagerTests: XCTestCase {
         let backend = FakeKeychainBackend()
         backend.seed(["ms_access_token": "fake-access", "ms_refresh_token": "fake-refresh", "ms_token_expiry": "1", "ms_graph_account_id": "fake-A"])
         let store = KeychainHelper(backend: backend)
-        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: store, defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         MockURLProtocol.responseDelay = 0.08
         MockURLProtocol.handler = { _ in .http(status: 200, json: ["access_token": "fake-new", "refresh_token": "fake-refresh-new", "expires_in": 3600]) }
@@ -86,7 +92,7 @@ final class AuthManagerTests: XCTestCase {
     }
     func testLateRefreshCannotRestoreSignedOutSession() async throws {
         let store = seededStore()
-        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: store, defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         MockURLProtocol.responseDelay = 0.15
         MockURLProtocol.handler = { _ in .http(status: 200, json: ["access_token": "fake-late", "expires_in": 3600]) }
         let task = Task { try await auth.refreshTokens() }
@@ -105,7 +111,7 @@ final class AuthManagerTests: XCTestCase {
     func testLegacySessionMustResolveGraphIDBeforeSync() async throws {
         let store = KeychainHelper(inMemoryOnly: true)
         store.update(strings: ["ms_access_token": "fake-access"])
-        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: store, defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         XCTAssertNil(auth.accountID)
         MockURLProtocol.handler = { _ in .http(status: 200, json: ["id": "fake-graph-id"]) }
         let id = try await auth.ensureAccountID()
@@ -117,7 +123,7 @@ final class AuthManagerTests: XCTestCase {
     func testRejectedRefreshInvalidatesSessionWithoutDeletingStoredCredentials() async throws {
         let backend = FakeKeychainBackend()
         backend.seed(["ms_access_token": "fake-access", "ms_refresh_token": "fake-refresh", "ms_token_expiry": "1", "ms_graph_account_id": "fake-A"])
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         MockURLProtocol.handler = { _ in .http(status: 400, json: [:]) }
         do { _ = try await auth.refreshTokens(); XCTFail("刷新拒绝应抛错") } catch {}
@@ -130,7 +136,7 @@ final class AuthManagerTests: XCTestCase {
     func testConcurrentIdentityResolutionReadsProfileAndPersistsOnlyOnce() async throws {
         let backend = FakeKeychainBackend()
         backend.seed(["ms_access_token": "fake-access"])
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         MockURLProtocol.responseDelay = 0.05
         MockURLProtocol.handler = { _ in .http(status: 200, json: ["id": "fake-A"]) }
@@ -154,7 +160,7 @@ final class AuthManagerTests: XCTestCase {
         let backend = seededBackend()
         backend.gate = DispatchSemaphore(value: 0)
         backend.entered = DispatchSemaphore(value: 0)
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         // init returned on the main thread even though the keychain read is hung
         XCTAssertEqual(auth.restoreState, .loading)
         XCTAssertFalse(auth.isAuthenticated)
@@ -170,7 +176,7 @@ final class AuthManagerTests: XCTestCase {
     func testNeedsInteractionShowsExplanationOnceThenExactlyOneInteractiveRead() async {
         let backend = seededBackend()
         backend.nonInteractiveStatus = -25308
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         XCTAssertEqual(auth.restoreState, .needsConsent)
         XCTAssertTrue(auth.needsKeychainExplanation)
@@ -189,7 +195,7 @@ final class AuthManagerTests: XCTestCase {
 
     func testNormalSuccessNeverShowsTheExplanation() async {
         let backend = seededBackend()
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         XCTAssertFalse(auth.needsKeychainExplanation)
         XCTAssertEqual(backend.reads.map { $0.2 }, [false])
@@ -198,7 +204,7 @@ final class AuthManagerTests: XCTestCase {
     func testDecliningTheExplanationReadsNothingAndKeepsEverything() async {
         let backend = seededBackend()
         backend.nonInteractiveStatus = -25308
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         auth.declineKeychainAccess()
         XCTAssertEqual(auth.restoreState, .denied(Int32(errSecUserCanceled)))
@@ -215,7 +221,7 @@ final class AuthManagerTests: XCTestCase {
         let backend = seededBackend()
         backend.nonInteractiveStatus = -25308
         backend.interactiveStatus = errSecUserCanceled
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         await auth.confirmKeychainAccess()
         XCTAssertEqual(auth.restoreState, .denied(Int32(errSecUserCanceled)))
@@ -234,7 +240,7 @@ final class AuthManagerTests: XCTestCase {
         let backend = seededBackend()
         for account in KeychainHelper.legacyAccounts { backend.seedRaw(account: account, "legacy-old-\(account)") }
         backend.seedRaw(account: "other-app-item", "unrelated")
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         XCTAssertTrue(auth.isAuthenticated)
         auth.signOut()
@@ -247,7 +253,7 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertTrue(backend.hasItem("other-app-item"))
         XCTAssertNil(auth.lastAuthError)
         let readsBefore = backend.reads.count
-        let relaunched = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let relaunched = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await relaunched.waitForRestore()
         XCTAssertFalse(relaunched.isAuthenticated, "重开不会自动登录（已退出标记）")
         XCTAssertEqual(relaunched.activeScope, .unlinkedLocal)
@@ -258,7 +264,7 @@ final class AuthManagerTests: XCTestCase {
         let backend = seededBackend()
         backend.gate = DispatchSemaphore(value: 0)
         backend.entered = DispatchSemaphore(value: 0)
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         auth.signOut()
         backend.gate!.signal()
         await auth.waitForRestore()
@@ -276,7 +282,7 @@ final class AuthManagerTests: XCTestCase {
 
     func testCancelledLoginKeepsPreviousSessionAndRelaunchAgreesWithTheUI() async {
         let backend = seededBackend()
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         XCTAssertTrue(auth.isAuthenticated)
         let generation = auth.sessionGeneration
@@ -292,14 +298,14 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertTrue(backend.deletes.isEmpty && backend.writes.isEmpty, "取消不写也不删钥匙串")
         XCTAssertFalse(defaults.bool(forKey: "ms_explicitly_signed_out"))
         // 重启后的状态与取消后 UI 一致（都是仍登录原账号）
-        let relaunched = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let relaunched = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await relaunched.waitForRestore()
         XCTAssertEqual(relaunched.isAuthenticated, auth.isAuthenticated)
         XCTAssertEqual(relaunched.accountID, auth.accountID)
     }
 
     func testCancelledLoginWhenSignedOutStaysSignedOut() async {
-        let auth = AuthManager(keychain: KeychainHelper(inMemoryOnly: true), defaults: defaults, loadStoredAuth: false)
+        let auth = AuthManager(keychain: KeychainHelper(inMemoryOnly: true), defaults: defaults, network: mockSession, loadStoredAuth: false)
         auth.authSessionRunner = { _, _ in throw CancellationError() }
         do { try await auth.signIn(); XCTFail() } catch {}
         XCTAssertFalse(auth.isAuthenticated)
@@ -308,7 +314,7 @@ final class AuthManagerTests: XCTestCase {
 
     func testFailedTokenExchangeAlsoRestoresPreviousSessionAndStoresNothingNew() async {
         let backend = seededBackend()
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         auth.authSessionRunner = { [self] url, _ in callback(from: url) }
         MockURLProtocol.handler = { _ in .http(status: 400, json: ["error": "invalid_grant"]) }
@@ -320,7 +326,7 @@ final class AuthManagerTests: XCTestCase {
 
     func testSignOutDuringLoginIsNeverUndoneByTheCancelRestore() async {
         let backend = seededBackend()
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         auth.authSessionRunner = { _, _ in
             auth.signOut()                       // user signs out while the sheet is up
@@ -336,7 +342,7 @@ final class AuthManagerTests: XCTestCase {
 
     func testSuccessfulLoginReplacesTheSessionAndDoesNotRestoreTheOldOne() async throws {
         let backend = seededBackend()
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
         auth.authSessionRunner = { [self] url, _ in callback(from: url) }
         MockURLProtocol.handler = { request in
@@ -366,7 +372,7 @@ final class AuthManagerTests: XCTestCase {
         let backend = verifiedBackend()
         MockURLProtocol.responseDelay = 0.05
         MockURLProtocol.handler = { [self] _ in graphMe("fake-A") }
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession)
         await auth.waitForRestore()
         XCTAssertFalse(auth.isIdentityVerified, "缓存账号 ID 在复核前不能当作已确认身份")
         XCTAssertEqual(auth.activeScope, .account("fake-A"), "复核前仅本地显示缓存账号（不放行云端操作）")
@@ -381,7 +387,7 @@ final class AuthManagerTests: XCTestCase {
         let backend = verifiedBackend()
         MockURLProtocol.responseDelay = 0.05
         MockURLProtocol.handler = { [self] _ in graphMe("fake-B") }
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession)
         await auth.waitForRestore()
         await auth.waitForIdentityVerification()
         XCTAssertNil(auth.accountID)
@@ -402,7 +408,7 @@ final class AuthManagerTests: XCTestCase {
     func testUnreachableGraphKeepsIdentityProvisionalAndLaterRetryConfirms() async throws {
         let backend = verifiedBackend()
         MockURLProtocol.handler = { _ in .failure(.notConnectedToInternet) }
-        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults)
+        let auth = AuthManager(keychain: KeychainHelper(backend: backend), defaults: defaults, network: mockSession)
         await auth.waitForRestore()
         await auth.waitForIdentityVerification()
         XCTAssertEqual(auth.accountID, "fake-A")
@@ -415,7 +421,7 @@ final class AuthManagerTests: XCTestCase {
     }
 
     func testSignInSuccessMarksNewIdentityVerified() async throws {
-        let auth = AuthManager(keychain: KeychainHelper(inMemoryOnly: true), defaults: defaults, loadStoredAuth: false)
+        let auth = AuthManager(keychain: KeychainHelper(inMemoryOnly: true), defaults: defaults, network: mockSession, loadStoredAuth: false)
         auth.authSessionRunner = { [self] url, _ in callback(from: url) }
         MockURLProtocol.handler = { request in
             if request.url?.host == "login.microsoftonline.com" {
@@ -441,7 +447,7 @@ final class AuthManagerTests: XCTestCase {
 
     func testSequentialRefreshRequestsWithinCooldownShareOneNetworkCall() async throws {
         let clock = FakeClock()
-        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults,
+        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults, network: mockSession,
                                verifyIdentityAfterRestore: false, now: { clock.date })
         await auth.waitForRestore()
         MockURLProtocol.handler = { [self] _ in tokenReply() }
@@ -461,7 +467,7 @@ final class AuthManagerTests: XCTestCase {
 
     func testShortLivedTokenDoesNotCauseARefreshOnEveryAccess() async throws {
         let clock = FakeClock()
-        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults,
+        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults, network: mockSession,
                                verifyIdentityAfterRestore: false, now: { clock.date })
         await auth.waitForRestore()
         MockURLProtocol.handler = { [self] _ in tokenReply(expires: 120) }   // inside the 5-minute early-refresh window
@@ -471,7 +477,7 @@ final class AuthManagerTests: XCTestCase {
 
     func testFailedRefreshBacksOffExponentiallyAndRecovers() async throws {
         let clock = FakeClock()
-        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults,
+        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults, network: mockSession,
                                verifyIdentityAfterRestore: false, now: { clock.date })
         await auth.waitForRestore()
         MockURLProtocol.handler = { _ in .failure(.notConnectedToInternet) }
@@ -499,7 +505,7 @@ final class AuthManagerTests: XCTestCase {
 
     func testBackoffIsCappedAndRejectedTokenStillSignsOutImmediately() async throws {
         let clock = FakeClock()
-        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults,
+        let auth = AuthManager(keychain: KeychainHelper(backend: expiredStore()), defaults: defaults, network: mockSession,
                                verifyIdentityAfterRestore: false, now: { clock.date })
         await auth.waitForRestore()
         MockURLProtocol.handler = { _ in .failure(.timedOut) }
@@ -519,7 +525,7 @@ final class AuthManagerTests: XCTestCase {
         let store = KeychainHelper(inMemoryOnly: true)
         store.update(strings: ["ms_access_token": "fake-access", "ms_refresh_token": "fake-refresh", "ms_token_expiry": "9999999999",
                                "ms_graph_account_id": "acct-A", "ms_user_email": "a@example.test", "ms_user_name": "A"])
-        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false, refreshCooldown: cooldown)
+        let auth = AuthManager(keychain: store, defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false, refreshCooldown: cooldown)
         await auth.waitForRestore()
         let schema = Schema([StickyNote.self])
         let container = try ModelContainer(for: schema, configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)])
@@ -548,7 +554,12 @@ final class AuthManagerTests: XCTestCase {
             }
         }
         _ = try await auth.ensureAccountID()
-        let engine = SyncEngine(authManager: auth, debounceNanoseconds: 1_000_000)
+        let syncSuite = "auth-sync-403-" + UUID().uuidString
+        let syncDefaults = UserDefaults(suiteName: syncSuite)!
+        defer { syncDefaults.removePersistentDomain(forName: syncSuite) }
+        let engine = SyncEngine(authManager: auth, debounceNanoseconds: 1_000_000,
+                                colorLedger: ColorEditLedger(defaults: syncDefaults), defaults: syncDefaults, startPeriodicSync: false)
+        defer { engine.cancelPendingWork() }
         await engine.syncAll(modelContext: context)
         let tokenCalls = MockURLProtocol.requests.filter { $0.url.host == "login.microsoftonline.com" }.count
         return (tokenCalls, notes.filter { $0.remoteId?.hasPrefix("new-") == true }.count)
@@ -576,7 +587,7 @@ final class AuthManagerTests: XCTestCase {
             "ms_graph_account_id": "acct-test"
         ])
         let store = KeychainHelper(backend: backend)
-        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: store, defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
 
         var meCallCount = 0
@@ -604,7 +615,7 @@ final class AuthManagerTests: XCTestCase {
     func testSignInDoesNotPersistPartialSessionIfMeFails() async throws {
         let backend = FakeKeychainBackend()
         let store = KeychainHelper(backend: backend)
-        let auth = AuthManager(keychain: store, defaults: defaults, loadStoredAuth: false)
+        let auth = AuthManager(keychain: store, defaults: defaults, network: mockSession, loadStoredAuth: false)
         auth.authSessionRunner = { [self] url, _ in callback(from: url) }
 
         MockURLProtocol.handler = { request in
@@ -641,7 +652,7 @@ final class AuthManagerTests: XCTestCase {
             "ms_graph_account_id": "acct-A"
         ])
         let store = KeychainHelper(backend: backend)
-        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: store, defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
 
         // /me returns B while keychain claims A -> mismatch detected, accountID cleared.
@@ -667,7 +678,7 @@ final class AuthManagerTests: XCTestCase {
         let backend = FakeKeychainBackend()
         backend.seed(["ms_access_token": "tok-A", "ms_refresh_token": "ref-A", "ms_graph_account_id": "acct-A"])
         let store = KeychainHelper(backend: backend)
-        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: store, defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
 
         auth.signOut()
@@ -696,7 +707,7 @@ final class AuthManagerTests: XCTestCase {
             "ms_graph_account_id": "acct-A"
         ])
         let store = KeychainHelper(backend: backend)
-        let auth = AuthManager(keychain: store, defaults: defaults, verifyIdentityAfterRestore: false)
+        let auth = AuthManager(keychain: store, defaults: defaults, network: mockSession, verifyIdentityAfterRestore: false)
         await auth.waitForRestore()
 
         MockURLProtocol.handler = { _ in .http(status: 400, json: [:]) }

@@ -92,15 +92,20 @@ struct RecoveryReviewView: View {
         .fileExporter(isPresented: $showExporter, document: exportDocument, contentType: .json,
                       defaultFilename: "StickyNote-Recovery-" + (selectedID?.uuidString ?? "record")) { result in
             exportDocument = nil
-            if case .failure(let error) = result { notice = error.localizedDescription }
+            switch result {
+            case .success(let url):
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            case .failure(let error):
+                notice = error.localizedDescription
+            }
         }
     }
     private func details(_ note: StickyNote) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(note.title).font(.headline)
-            Text("Local ID: " + note.id.uuidString).font(.caption).textSelection(.enabled)
-            Text("Original Graph account ID: " + (note.ownerAccountID ?? "—")).font(.caption).textSelection(.enabled)
-            Text("Operation: " + (note.pendingCreateOperationID ?? "—")).font(.caption).textSelection(.enabled)
+            Text(String(localized: "Local ID: ") + note.id.uuidString).font(.caption).textSelection(.enabled)
+            Text(String(localized: "Original Graph account ID: ") + (note.ownerAccountID ?? "—")).font(.caption).textSelection(.enabled)
+            Text(String(localized: "Operation: ") + (note.pendingCreateOperationID ?? "—")).font(.caption).textSelection(.enabled)
             if let endpoint = note.pendingCreateEndpoint { Text(endpoint).font(.caption) }
             Text(note.plainTextContent).lineLimit(8).textSelection(.enabled)
             Button(String(localized: "Export retained content and recovery metadata…")) {
@@ -113,7 +118,7 @@ struct RecoveryReviewView: View {
                 Text(String(localized: "Old remote IDs retained — never automatically deleted:")).font(.caption)
                 ForEach(note.recoveryRetainedRemoteIDs, id: \.self) { Text($0).font(.caption).textSelection(.enabled) }
             }
-            if let pending = note.recoveryPendingDeleteID { Text("Pending DELETE: " + pending).font(.caption).textSelection(.enabled) }
+            if let pending = note.recoveryPendingDeleteID { Text(String(localized: "Pending DELETE: ") + pending).font(.caption).textSelection(.enabled) }
             candidatePanel(note)
             TextField(String(localized: "Verification evidence / reason (no passwords or tokens)"), text: $reason)
                 .textFieldStyle(.roundedBorder)
@@ -214,27 +219,27 @@ struct RecoveryReviewView: View {
         switch action {
         case .associate:
             warning = String(localized: "Link this exact verified object, restore visibility, and resume later updates. Preserve local snapshots and old references. No automatic cloud merge, deletion, or recreate.")
-            remoteLine = "Remote: " + (candidate?.id ?? "—")
+            remoteLine = String(localized: "Remote: ") + (candidate?.id ?? "—")
             actionCandidate = candidate
         case .deleteCandidate:
             warning = String(localized: "Delete exactly the verified remote object, then retain the source locally with sync paused. Other unknown copies are not automatically found or deleted.")
-            remoteLine = "Remote: " + (candidate?.id ?? "—")
+            remoteLine = String(localized: "Remote: ") + (candidate?.id ?? "—")
             actionCandidate = candidate
         case .deleteRetained:
             warning = String(localized: "Delete only this verified retained old ID. Do not resolve any separate unknown creation by guessing.")
-            remoteLine = "Remote: " + (candidate?.id ?? "—")
+            remoteLine = String(localized: "Remote: ") + (candidate?.id ?? "—")
             actionCandidate = candidate
         case .retryCreate:
             warning = String(localized: "You are authorizing a new POST in the original account. The old POST may already exist: duplicates or orphan objects are possible. Preserve old operation history and do not automatically delete old objects.")
-            remoteLine = "Remote: new POST (duplicate risk)"
+            remoteLine = String(localized: "Remote: new POST (duplicate risk)")
             actionCandidate = nil
         case .restoreLocal:
             warning = String(localized: "Restore local visibility with sync paused. Keep unknown creation markers and all audit records; do not write to Microsoft.")
-            remoteLine = "Remote: none (local-only)"
+            remoteLine = String(localized: "Remote: none (local-only)")
             actionCandidate = nil
         }
-        let accountLine = "Account: " + (note.ownerAccountID ?? "—")
-        let localLine = "Local: " + note.id.uuidString
+        let accountLine = String(localized: "Account: ") + (note.ownerAccountID ?? "—")
+        let localLine = String(localized: "Local: ") + note.id.uuidString
         let message = [warning, accountLine, localLine, remoteLine].joined(separator: "\n")
         pendingConfirmation = PendingRecoveryConfirmation(
             action: action,

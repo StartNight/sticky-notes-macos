@@ -1,29 +1,23 @@
 import Foundation
 
 extension Date {
-    var relativeFormatted: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: self, relativeTo: Date())
+    var noteListFormatted: String {
+        noteListFormatted(relativeTo: Date(), calendar: .current)
     }
 
-    var noteListFormatted: String {
-        let calendar = Calendar.current
-        if calendar.isDateInToday(self) {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "h:mm a"
-            return formatter.string(from: self)
-        } else if calendar.isDateInYesterday(self) {
-            return String(localized: "Yesterday")
-        } else if let daysAgo = calendar.dateComponents([.day], from: self, to: Date()).day, daysAgo < 7 {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "EEEE"
-            return formatter.string(from: self)
-        } else {
-            let formatter = DateFormatter()
-            formatter.dateStyle = .medium
-            formatter.timeStyle = .none
-            return formatter.string(from: self)
+    func noteListFormatted(relativeTo referenceDate: Date, calendar: Calendar = .current) -> String {
+        if calendar.isDate(self, inSameDayAs: referenceDate) {
+            return self.formatted(date: .omitted, time: .shortened)
         }
+        let startOfSelf = calendar.startOfDay(for: self)
+        let startOfRef = calendar.startOfDay(for: referenceDate)
+        let dayDiff = calendar.dateComponents([.day], from: startOfSelf, to: startOfRef).day
+        if dayDiff == 1 {
+            return String(localized: "Yesterday")
+        }
+        if let dayDiff, (2..<7).contains(dayDiff) {
+            return self.formatted(.dateTime.weekday(.wide))
+        }
+        return self.formatted(date: .abbreviated, time: .omitted)
     }
 }

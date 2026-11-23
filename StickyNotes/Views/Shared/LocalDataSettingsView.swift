@@ -10,24 +10,32 @@ private struct LocalExportDocument: FileDocument {
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
 }
 
+private struct PendingDuplicateCopy {
+    let noteID: UUID
+    let accountID: String
+    let generation: UUID
+    let message: String
+}
+
 /// Where data outside the active account scope is managed. Nothing here is automatic:
 /// every claim / copy / export is an explicit per-item (or per-bucket) user action, and nothing talks to Graph.
 struct LocalDataSettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var allNotes: [StickyNote]
     @State private var authManager = AuthManager.shared
-    @State private var syncEngine = SyncEngine.shared
+    @State private var adoptionCoordinator = AdoptionPromptCoordinator.shared
     @State private var message: String?
     @State private var exportDocument: LocalExportDocument?
+    @State private var exportFilename = "StickyNotes-LocalExport"
     @State private var showExporter = false
     @State private var pendingExport: (notes: [StickyNote], label: String)?
     @State private var confirmOutOfScopeExport = false
-    @State private var duplicateCopyCandidate: StickyNote?
-    @State private var duplicateCopyMessage = ""
+    @State private var pendingDuplicateCopy: PendingDuplicateCopy?
     private let service = AccountIsolationService.shared
     @State private var legacyKeychainStep = 0   // 0 idle, 1 first confirmation, 2 final confirmation
 
     private var scope: ActiveScope { authManager.activeScope }
+    private var canWriteToCurrentAccount: Bool { scope.accountID != nil && authManager.isIdentityVerified }
     private var notes: [StickyNote] { Array(allNotes) }
 
     var body: some View {
@@ -45,7 +53,7 @@ struct LocalDataSettingsView: View {
                 Section(String(localized: "No-account notes")) {
                     Text(String(localized: "Created while signed out. They are never uploaded unless you move them into an account."))
                         .font(.caption).foregroundStyle(.secondary)
-                    if scope.accountID != nil {
+                    if canWriteToCurrentAccount {
                         ForEach(unlinked) { note in
                             HStack {
                                 Text(note.title).lineLimit(1)
@@ -69,15 +77,15 @@ struct LocalDataSettingsView: View {
                     ForEach(quarantined) { note in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(note.title).lineLimit(1)
-                            if note.hasCloudTrace {
+                            if note.hasCloudTrace || note.isDeletedLocally {
                                 Text(String(localized: "Has cloud traces — owner could be any account. Copy keeps this original untouched."))
                                     .font(.caption2).foregroundStyle(.orange)
-                                if scope.accountID != nil {
+                                if canWriteToCurrentAccount {
                                     Button(String(localized: "Copy to current account as new note")) { copyLegacy(note, allowSimilarContent: false) }
                                 }
                             } else {
                                 HStack {
-                                    if scope.accountID != nil {
+                                    if canWriteToCurrentAccount {
                                         Button(String(localized: "Move to current account")) { run { try service.claimLegacy(note, to: .currentAccount, modelContext: modelContext) } }
                                     }
                                     Button(String(localized: "Keep as no-account note")) { run { try service.claimLegacy(note, to: .noAccountLocal, modelContext: modelContext) } }
@@ -112,11 +120,17 @@ struct LocalDataSettingsView: View {
                 Button(String(localized: "Remove old keychain entries…"), role: .destructive) { legacyKeychainStep = 1 }
             }
 
+            if let adoptionError = adoptionCoordinator.lastError {
+                Text(adoptionError).font(.caption).foregroundStyle(.red)
+            }
             if let message { Text(message).font(.caption).foregroundStyle(.orange) }
         }
         .alert(String(localized: "Remove old keychain entries?"), isPresented: Binding(get: { legacyKeychainStep == 1 }, set: { if !$0 && legacyKeychainStep == 1 { legacyKeychainStep = 0 } })) {
             Button(String(localized: "Cancel"), role: .cancel) { legacyKeychainStep = 0 }
-            Button(String(localized: "Continue…"), role: .destructive) { legacyKeychainStep = 2 }
+            Button(String(localized: "Continue…"), role: .destructive) {
+                legacyKeychainStep = 0
+                DispatchQueue.main.async { legacyKeychainStep = 2 }
+            }
         } message: {
             Text(String(localized: "This deletes up to 5 old per-field sign-in entries (access/refresh token, expiry, email, name) left by earlier versions. Your notes and the current session are not touched."))
         }
@@ -132,26 +146,43 @@ struct LocalDataSettingsView: View {
         } message: {
             Text(String(localized: "This cannot be undone."))
         }
-        .alert(String(localized: "Possible duplicate"), isPresented: Binding(get: { duplicateCopyCandidate != nil }, set: { if !$0 { duplicateCopyCandidate = nil } })) {
-            Button(String(localized: "Cancel"), role: .cancel) { duplicateCopyCandidate = nil }
+        .alert(String(localized: "Possible duplicate"), isPresented: Binding(get: { pendingDuplicateCopy != nil }, set: { if !$0 { pendingDuplicateCopy = nil } })) {
+            Button(String(localized: "Cancel"), role: .cancel) { pendingDuplicateCopy = nil }
             Button(String(localized: "Copy Anyway")) {
-                if let note = duplicateCopyCandidate { copyLegacy(note, allowSimilarContent: true) }
-                duplicateCopyCandidate = nil
+                guard let pending = pendingDuplicateCopy else { return }
+                pendingDuplicateCopy = nil
+                guard authManager.activeScope == .account(pending.accountID),
+                      authManager.isIdentityVerified,
+                      authManager.sessionGeneration == pending.generation else {
+                    message = IsolationError.stalePrompt.localizedDescription
+                    return
+                }
+                if let note = notes.first(where: { $0.id == pending.noteID && !$0.isDeleted }) {
+                    copyLegacy(note, allowSimilarContent: true)
+                }
             }
         } message: {
-            Text(duplicateCopyMessage)
+            Text(pendingDuplicateCopy?.message ?? "")
         }
         .formStyle(.grouped)
         .padding(8)
         .alert(String(localized: "Export data outside the current scope?"), isPresented: $confirmOutOfScopeExport) {
             Button(String(localized: "Cancel"), role: .cancel) { pendingExport = nil }
-            Button(String(localized: "Export to a file I choose")) { performExport(acknowledged: true) }
+            Button(String(localized: "Export to a file I choose")) {
+                DispatchQueue.main.async { performExport(acknowledged: true) }
+            }
         } message: {
             Text(String(localized: "This writes notes that do not belong to the current scope to a file you choose. Nothing is uploaded or changed."))
         }
         .fileExporter(isPresented: $showExporter, document: exportDocument, contentType: .json,
-                      defaultFilename: "StickyNotes-LocalExport") { result in
-            if case .failure(let error) = result { message = error.localizedDescription }
+                      defaultFilename: exportFilename) { result in
+            exportDocument = nil
+            switch result {
+            case .success(let url):
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            case .failure(let error):
+                message = error.localizedDescription
+            }
         }
     }
 
@@ -176,12 +207,20 @@ struct LocalDataSettingsView: View {
 
     /// Hard duplicates are refused with a message; a probable duplicate asks for explicit confirmation first.
     private func copyLegacy(_ note: StickyNote, allowSimilarContent: Bool) {
+        let capturedAccountID = scope.accountID
+        let capturedGeneration = authManager.sessionGeneration
         do {
             _ = try service.copyLegacyToCurrentAccount(note, allowSimilarContent: allowSimilarContent, modelContext: modelContext)
             message = nil
         } catch IsolationError.duplicateRisk(let why) {
-            duplicateCopyCandidate = note
-            duplicateCopyMessage = why
+            if let capturedAccountID {
+                pendingDuplicateCopy = PendingDuplicateCopy(
+                    noteID: note.id,
+                    accountID: capturedAccountID,
+                    generation: capturedGeneration,
+                    message: why
+                )
+            }
         } catch { message = error.localizedDescription }
     }
 
@@ -191,15 +230,30 @@ struct LocalDataSettingsView: View {
 
     private func requestExport(_ list: [StickyNote], label: String) {
         pendingExport = (list, label)
-        if list.contains(where: { !$0.isVisible(in: scope) }) { confirmOutOfScopeExport = true }
-        else { performExport(acknowledged: false) }
+        let provisionalAccountScope: Bool
+        if case .account = scope, !authManager.isIdentityVerified {
+            provisionalAccountScope = true
+        } else {
+            provisionalAccountScope = false
+        }
+        if provisionalAccountScope || list.contains(where: { !$0.isVisible(in: scope) }) {
+            confirmOutOfScopeExport = true
+        } else {
+            performExport(acknowledged: false)
+        }
     }
 
     private func performExport(acknowledged: Bool) {
         guard let pending = pendingExport else { return }
         pendingExport = nil
         do {
-            exportDocument = LocalExportDocument(data: try LocalExporter.export(pending.notes, scope: scope, acknowledgedOutOfScope: acknowledged))
+            exportFilename = "StickyNotes-LocalExport-\(pending.label)"
+            exportDocument = LocalExportDocument(data: try LocalExporter.export(
+                pending.notes,
+                scope: scope,
+                isIdentityVerified: authManager.isIdentityVerified,
+                acknowledgedOutOfScope: acknowledged
+            ))
             showExporter = true
         } catch { message = error.localizedDescription }
     }

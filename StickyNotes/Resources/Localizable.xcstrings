@@ -18,23 +18,6 @@
         }
       }
     },
-    "%@ note(s) were created while signed out: %@. Nothing is merged or uploaded until you confirm. If you decline they stay as local no-account notes." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%@ note(s) were created while signed out: %@. Nothing is merged or uploaded until you confirm. If you decline they stay as local no-account notes."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未登录时创建了 %@ 条便笺：%@。确认之前不会合并或上传。若选择暂不同步，它们会保留为本地无账号便笺。"
-          }
-        }
-      }
-    },
     "%@ note(s). Sign in to move them into an account." : {
       "extractionState" : "stale",
       "localizations" : {
@@ -48,6 +31,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%@ 条便笺。登录后才可归入账号。"
+          }
+        }
+      }
+    },
+    "Account Connection" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Account Connection"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "账号关联"
           }
         }
       }
@@ -69,19 +69,18 @@
         }
       }
     },
-    "Account Connection" : {
-      "extractionState" : "manual",
+    "Account: " : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Account Connection"
+            "value" : "Account: "
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "账号关联"
+            "value" : "账号："
           }
         }
       }
@@ -320,6 +319,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "炭笔"
+          }
+        }
+      }
+    },
+    "Clear search" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Clear search"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "清除搜索"
           }
         }
       }
@@ -698,23 +713,6 @@
         }
       }
     },
-    "Delete exactly the verified remote object, then retain the source locally with sync paused. Other unknown copies are not automatically found or deleted." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Delete exactly the verified remote object, then retain the source locally with sync paused. Other unknown copies are not automatically found or deleted."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "仅删除已核验的这个远端对象；源内容保留在本地并暂停同步。不会自动查找或删除其他未知副本。"
-          }
-        }
-      }
-    },
     "Delete Note" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -762,6 +760,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "删除旧条目"
+          }
+        }
+      }
+    },
+    "Delete exactly the verified remote object, then retain the source locally with sync paused. Other unknown copies are not automatically found or deleted." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delete exactly the verified remote object, then retain the source locally with sync paused. Other unknown copies are not automatically found or deleted."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅删除已核验的这个远端对象；源内容保留在本地并暂停同步。不会自动查找或删除其他未知副本。"
           }
         }
       }
@@ -1191,6 +1206,22 @@
         }
       }
     },
+    "Graph Note" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Graph Note"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Graph 便签"
+          }
+        }
+      }
+    },
     "Gray" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1412,13 +1443,13 @@
         }
       }
     },
-    "Keep as no-account note" : {
+    "Keep as No-Account Notes" : {
       "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Keep as no-account note"
+            "value" : "Keep as No-Account Notes"
           }
         },
         "zh-Hans" : {
@@ -1429,13 +1460,13 @@
         }
       }
     },
-    "Keep as No-Account Notes" : {
+    "Keep as no-account note" : {
       "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Keep as No-Account Notes"
+            "value" : "Keep as no-account note"
           }
         },
         "zh-Hans" : {
@@ -1548,6 +1579,22 @@
         }
       }
     },
+    "Local ID: " : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Local ID: "
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "本地 ID："
+          }
+        }
+      }
+    },
     "Local recovery audit (not sent as logs)" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -1565,19 +1612,34 @@
         }
       }
     },
-    "macOS may show the keychain prompt twice. Please choose Always Allow both times. Choosing Deny or Cancel deletes nothing, and the app will not ask again until you restart it." : {
-      "extractionState" : "stale",
+    "Local: " : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "macOS may show the keychain prompt twice. Please choose Always Allow both times. Choosing Deny or Cancel deletes nothing, and the app will not ask again until you restart it."
+            "value" : "Local: "
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "macOS 可能连续弹出两次钥匙串授权窗口，请两次都选择「始终允许」。选择「拒绝」或「取消」不会删除任何数据，且在重启 App 前不会再次询问。"
+            "value" : "本地："
+          }
+        }
+      }
+    },
+    "Mailbox Sticky Note" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mailbox Sticky Note"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "邮箱便签"
           }
         }
       }
@@ -1735,23 +1797,6 @@
         }
       }
     },
-    "Not linked to current account — kept locally" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Not linked to current account — kept locally"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未关联当前账号：仅在本地保留"
-          }
-        }
-      }
-    },
     "Not Now" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -1765,23 +1810,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "暂不"
-          }
-        }
-      }
-    },
-    "Not Now (Keep as No-Account Notes)" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Not Now (Keep as No-Account Notes)"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "暂不同步（保留为无账号便笺）"
           }
         }
       }
@@ -1803,23 +1831,6 @@
         }
       }
     },
-    "Note not found" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Note not found"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未找到便签"
-          }
-        }
-      }
-    },
     "Note Options" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -1837,36 +1848,19 @@
         }
       }
     },
-    "Notes from other accounts and legacy unowned notes remain local and are not uploaded to this account." : {
-      "extractionState" : "stale",
+    "Note not found" : {
+      "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Notes from other accounts and legacy unowned notes remain local and are not uploaded to this account."
+            "value" : "Note not found"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "其他账号及归属不明的旧便笺仅保留在本地，不会上传至当前账号。"
-          }
-        }
-      }
-    },
-    "Notes from other accounts, no-account notes and legacy unowned notes are hidden here and never uploaded to this account. Manage them under Local Data." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Notes from other accounts, no-account notes and legacy unowned notes are hidden here and never uploaded to this account. Manage them under Local Data."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "其他账号的便笺、无账号便笺和旧版本归属不明的便笺在此处不显示，也不会上传到当前账号。请到「本地数据」管理。"
+            "value" : "未找到便签"
           }
         }
       }
@@ -1884,6 +1878,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "便签列表"
+          }
+        }
+      }
+    },
+    "Notes from other accounts, no-account notes and legacy unowned notes are hidden here and never uploaded to this account. Manage them under Local Data." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Notes from other accounts, no-account notes and legacy unowned notes are hidden here and never uploaded to this account. Manage them under Local Data."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "其他账号的便笺、无账号便笺和旧版本归属不明的便笺在此处不显示，也不会上传到当前账号。请到「本地数据」管理。"
           }
         }
       }
@@ -1968,24 +1979,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "保留的旧远端 ID：不会自动删除："
-          }
-        }
-      }
-    },
-    "Only notes never linked to a remote account will be assigned. Legacy remote notes and other accounts' notes will not be changed." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Only notes never linked to a remote account will be assigned. Legacy remote notes and other accounts' notes will not be changed."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "仅分配从未关联远端的本地便笺。带旧远端关联的便笺及其他账号的便笺不变。"
+            "value" : "保留的旧远端 ID（不会自动删除）："
           }
         }
       }
@@ -2003,6 +1997,38 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "打开便签"
+          }
+        }
+      }
+    },
+    "Operation: " : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Operation: "
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "操作 ID："
+          }
+        }
+      }
+    },
+    "Original Graph account ID: " : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Original Graph account ID: "
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "原 Graph 账号 ID："
           }
         }
       }
@@ -2041,19 +2067,18 @@
         }
       }
     },
-    "Pending upload" : {
-      "extractionState" : "manual",
+    "Pending DELETE: " : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Pending upload"
+            "value" : "Pending DELETE: "
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "等待上传"
+            "value" : "待核对删除 ID："
           }
         }
       }
@@ -2065,6 +2090,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Pending Upload"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "等待上传"
+          }
+        }
+      }
+    },
+    "Pending upload" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pending upload"
           }
         },
         "zh-Hans" : {
@@ -2296,6 +2338,54 @@
         }
       }
     },
+    "Remote: " : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Remote: "
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "远端："
+          }
+        }
+      }
+    },
+    "Remote: new POST (duplicate risk)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Remote: new POST (duplicate risk)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "远端：新建 POST（存在重复风险）"
+          }
+        }
+      }
+    },
+    "Remote: none (local-only)" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Remote: none (local-only)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "远端：无（仅本地恢复，不写入微软）"
+          }
+        }
+      }
+    },
     "Remove old keychain entries?" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -2326,6 +2416,22 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "移除旧版钥匙串条目…"
+          }
+        }
+      }
+    },
+    "Reset Defaults" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reset Defaults"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复默认"
           }
         }
       }
@@ -2415,40 +2521,6 @@
         }
       }
     },
-    "Search notes..." : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Search notes..."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "搜索便签..."
-          }
-        }
-      }
-    },
-    "Select a recovery record from the original account." : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Select a recovery record from the original account."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "请选择原账号下的一条恢复记录。"
-          }
-        }
-      }
-    },
     "Select All" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -2466,19 +2538,19 @@
         }
       }
     },
-    "Sign in with Microsoft" : {
-      "extractionState" : "manual",
+    "Select a recovery record from the original account." : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sign in with Microsoft"
+            "value" : "Select a recovery record from the original account."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "使用微软账号登录"
+            "value" : "请选择原账号下的一条恢复记录。"
           }
         }
       }
@@ -2517,19 +2589,19 @@
         }
       }
     },
-    "Signed in — only this account's notes are shown." : {
-      "extractionState" : "stale",
+    "Sign in with Microsoft" : {
+      "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Signed in — only this account's notes are shown."
+            "value" : "Sign in with Microsoft"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "已登录——仅显示此账号的便笺。"
+            "value" : "使用微软账号登录"
           }
         }
       }
@@ -2547,6 +2619,23 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已登录账号"
+          }
+        }
+      }
+    },
+    "Signed in — only this account's notes are shown." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Signed in — only this account's notes are shown."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已登录——仅显示此账号的便笺。"
           }
         }
       }
@@ -2704,13 +2793,13 @@
         }
       }
     },
-    "Sync error" : {
+    "Sync Error" : {
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sync error"
+            "value" : "Sync Error"
           }
         },
         "zh-Hans" : {
@@ -2721,13 +2810,30 @@
         }
       }
     },
-    "Sync Error" : {
+    "Sync Now" : {
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sync Error"
+            "value" : "Sync Now"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "立即同步"
+          }
+        }
+      }
+    },
+    "Sync error" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sync error"
           }
         },
         "zh-Hans" : {
@@ -2755,19 +2861,19 @@
         }
       }
     },
-    "Sync Now" : {
-      "extractionState" : "manual",
+    "Sync to This Account" : {
+      "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sync Now"
+            "value" : "Sync to This Account"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "立即同步"
+            "value" : "同步到此账号"
           }
         }
       }
@@ -2785,23 +2891,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "同步到当前账号"
-          }
-        }
-      }
-    },
-    "Sync to This Account" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sync to This Account"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "同步到此账号"
           }
         }
       }
@@ -2870,23 +2959,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在同步..."
-          }
-        }
-      }
-    },
-    "this account" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "this account"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "此账号"
           }
         }
       }
@@ -3010,57 +3082,6 @@
         }
       }
     },
-    "Upload local-only notes?" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Upload local-only notes?"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "上传纯本地便笺？"
-          }
-        }
-      }
-    },
-    "Upload to current account" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Upload to current account"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "上传至当前账号"
-          }
-        }
-      }
-    },
-    "Upload unowned local-only notes to this account" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Upload unowned local-only notes to this account"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "将未归属的纯本地便笺上传至当前账号"
-          }
-        }
-      }
-    },
     "Verification evidence / reason (no passwords or tokens)" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -3159,6 +3180,40 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "你将明确授权在原账号重新 POST。旧请求可能已落地，可能产生重复或孤立对象。保留旧操作历史，不自动删除旧对象。"
+          }
+        }
+      }
+    },
+    "macOS may show the keychain prompt twice. Please choose Always Allow both times. Choosing Deny or Cancel deletes nothing, and the app will not ask again until you restart it." : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "macOS may show the keychain prompt twice. Please choose Always Allow both times. Choosing Deny or Cancel deletes nothing, and the app will not ask again until you restart it."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "macOS 可能连续弹出两次钥匙串授权窗口，请两次都选择「始终允许」。选择「拒绝」或「取消」不会删除任何数据，且在重启 App 前不会再次询问。"
+          }
+        }
+      }
+    },
+    "this account" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "this account"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此账号"
           }
         }
       }
