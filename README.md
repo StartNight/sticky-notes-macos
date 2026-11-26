@@ -40,9 +40,9 @@
 ## 下载与构建产物说明
 
 - **GitHub Releases 下载地址**：[https://github.com/StartNight/sticky-notes-macos/releases](https://github.com/StartNight/sticky-notes-macos/releases)
-- **当前构建产物**（`v1.0.1`）：
-  - `StickyNotes-macOS-Universal.zip`（约 **1.7 MB**；解压后为 `Sticky Notes.app`，Universal 双架构 `arm64` + `x86_64`，解压体积约 **3.9 MB**）
-  - `StickyNotes-macOS-Universal.zip.sha256`（SHA-256 校验文件，可用 `shasum -a 256 -c StickyNotes-macOS-Universal.zip.sha256` 校验；哈希值：`1cc0dc52648d00b127a36f871908bd14bda32d2df6c910a586f18a6b1f305391`）
+- **当前构建产物**（`v1.0.2`）：
+  - `StickyNotes-macOS-Universal.zip`（约 **1.7 MB**；解压后为 `Sticky Notes.app`，Universal 双架构 `arm64` + `x86_64`，解压体积约 **4.0 MB**）
+  - `StickyNotes-macOS-Universal.zip.sha256`（SHA-256 校验文件，可用 `shasum -a 256 -c StickyNotes-macOS-Universal.zip.sha256` 校验；哈希值：`35309bcda4561a8cb41f3e0817ae92a9c969acec2c4147786f93118922edf040`）
 - **构建与安全属性**：
   - 使用 Release 配置编译，已开启 Hardened Runtime（`flags=0x10000(runtime)`）、`DEAD_CODE_STRIPPING` 与符号剥离，已确认不含 `com.apple.security.get-task-allow`。
   - 最低系统要求：`macOS 14.0 (Sonoma)+`。
@@ -70,14 +70,14 @@ xcodegen generate
 open StickyNotes.xcodeproj          # 或在 Xcode 中 Cmd+R 运行
 ```
 
-命令行编译 Debug / Release 应用（Release 已开启 `ENABLE_HARDENED_RUNTIME: YES`、`DEAD_CODE_STRIPPING`、符号剥离与 `dwarf-with-dsym`，保持 `arm64 + x86_64` Universal 构建，产物约 3.9 MB）：
+命令行编译 Debug / Release 应用（Release 已开启 `ENABLE_HARDENED_RUNTIME: YES`、`DEAD_CODE_STRIPPING`、符号剥离与 `dwarf-with-dsym`，保持 `arm64 + x86_64` Universal 构建，产物约 4.0 MB）：
 
 ```bash
 xcodebuild -project StickyNotes.xcodeproj -scheme StickyNotes -destination 'platform=macOS' build
 xcodebuild -project StickyNotes.xcodeproj -scheme StickyNotes -configuration Release -destination 'platform=macOS' clean build
 ```
 
-运行无宿主单元测试（共 **289** 个用例，**不启动宿主 App**，不会打开你的真实数据库、钥匙串或剪贴板，也不会向 Graph 发真实请求）：
+运行无宿主单元测试（共 **296** 个用例，**不启动宿主 App**，不会打开你的真实数据库、钥匙串或剪贴板，也不会向 Graph 发真实请求）：
 
 ```bash
 xcodebuild test -project StickyNotes.xcodeproj -scheme StickyNotesTests -destination "platform=macOS"
@@ -179,7 +179,7 @@ scripts/sign-local.sh "/path/to/Sticky Notes.app"
 
 ### 单元测试（`Tests`）
 
-测试包共 **289** 个用例，无宿主应用、无真实网络、不触碰宿主数据库、钥匙串或剪贴板。
+测试包共 **296** 个用例，无宿主应用、无真实网络、不触碰宿主数据库、钥匙串或剪贴板。
 
 | 文件 | 职责 |
 |---|---|
