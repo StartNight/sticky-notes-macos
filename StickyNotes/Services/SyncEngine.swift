@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import SwiftUI
+import CryptoKit
 
 @MainActor
 @Observable
@@ -61,6 +62,7 @@ final class SyncEngine {
     private let authManager: any SyncAuthProviding
     private let defaults: UserDefaults
     private let colorLedger: ColorEditLedger
+    private let syncedContentLedger: SyncedContentLedger
     private let graphEndpoint = "https://graph.microsoft.com/v1.0"
     private var debounceTasks: [UUID: Task<Void, Never>] = [:]
     private var debounceTokens: [UUID: UUID] = [:]
@@ -72,6 +74,7 @@ final class SyncEngine {
     private var pullWaiters: [CheckedContinuation<Void, Never>] = []
     private var syncTimelineTick: UInt64 = 0
     private var noteLastUploadedTick: [UUID: UInt64] = [:]
+    private var recentlyDeletedRemoteTicks: [String: [String: UInt64]] = [:]
     private var recentlyPulledWhileCreating: Set<UUID> = []
     private var uploadingNoteIDs: Set<UUID> = []
     private var uploadWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
@@ -96,8 +99,23 @@ final class SyncEngine {
         for task in debounceTasks.values { task.cancel() }
         debounceTasks.removeAll()
         debounceTokens.removeAll()
+        recentlyPulledWhileCreating.removeAll()
+        noteLastUploadedTick.removeAll()
+        recentlyDeletedRemoteTicks.removeAll()
         incompleteTaskCount = 0
         state = .offline
+    }
+
+    private func recordRecentlyDeleted(remoteId: String, accountID: String) {
+        var map = recentlyDeletedRemoteTicks[accountID, default: [:]]
+        map[remoteId] = nextSyncTick()
+        if map.count > 500 {
+            let sorted = map.sorted { $0.value < $1.value }
+            for (oldKey, _) in sorted.prefix(map.count - 500) {
+                map.removeValue(forKey: oldKey)
+            }
+        }
+        recentlyDeletedRemoteTicks[accountID] = map
     }
 
     private static func isGuaranteedPreTransmissionError(_ error: Error) -> Bool {
@@ -124,7 +142,13 @@ final class SyncEngine {
             let next = waiters.removeFirst()
             uploadWaiters[id] = waiters
             next.resume() // lock ownership transfers; never opens a second POST window
-        } else { uploadingNoteIDs.remove(id); uploadWaiters.removeValue(forKey: id) }
+        } else {
+            uploadingNoteIDs.remove(id)
+            uploadWaiters.removeValue(forKey: id)
+            if uploadingNoteIDs.isEmpty {
+                recentlyPulledWhileCreating.removeAll()
+            }
+        }
     }
 
     private struct UploadSnapshot {
@@ -230,6 +254,7 @@ final class SyncEngine {
          startPeriodicSync shouldStartPeriodicSync: Bool = true) {
         self.authManager = authManager
         self.colorLedger = colorLedger
+        self.syncedContentLedger = SyncedContentLedger(defaults: defaults)
         self.defaults = defaults
         self.debounceNanoseconds = debounceNanoseconds
         if shouldStartPeriodicSync {
@@ -417,16 +442,20 @@ final class SyncEngine {
             }
         }
 
-        let hasInFlightCreate = localNotes.contains {
-            $0.ownerAccountID == scope.accountID && uploadingNoteIDs.contains($0.id) && $0.remoteId == nil
+        let hasInFlightUpload = localNotes.contains {
+            $0.ownerAccountID == scope.accountID &&
+            (uploadingNoteIDs.contains($0.id) || $0.pendingCreateOperationID != nil)
         }
         var seenRemoteIDs: Set<String> = []
         for msg in messages {
             guard let remoteId = msg["id"] as? String else {
                 continue
             }
-            // Record presence before checking changeKey so a message missing changeKey is never misclassified as deleted.
-            seenRemoteIDs.insert(remoteId)
+            // Record presence before checking changeKey so a message missing changeKey is never misclassified as deleted;
+            // skip duplicate rows if Graph @odata.nextLink pagination shifts mid-pull.
+            guard seenRemoteIDs.insert(remoteId).inserted else {
+                continue
+            }
             guard let changeKey = msg["changeKey"] as? String else {
                 continue
             }
@@ -434,6 +463,7 @@ final class SyncEngine {
             let bodyObj = msg["body"] as? [String: Any]
             let htmlContent = (bodyObj?["content"] as? String) ?? ""
             let plainText = NoteConverter.extractPlainText(from: htmlContent)
+            let normalizedRemote = NoteConverter.normalizedPlainTextForComparison(plainText)
 
             let remoteModifiedDate = Self.plausibleGraphDate(msg["lastModifiedDateTime"] as? String)
             let remoteCreatedDate = Self.plausibleGraphDate(msg["createdDateTime"] as? String)
@@ -448,7 +478,9 @@ final class SyncEngine {
 
             let existingLocal = localByRemoteId[remoteId]
             if (pendingRemoteDeletes[scope.accountID] ?? []).contains(remoteId) ||
-                existingLocal?.isDeletedLocally == true || retiredIDs.contains(remoteId) {
+                existingLocal?.isDeletedLocally == true ||
+                retiredIDs.contains(remoteId) ||
+                (recentlyDeletedRemoteTicks[scope.accountID]?[remoteId] ?? 0) > pullStartTick {
                 // Never resurrect tombstones/retired objects. Durable delete replay is centralized
                 // in pushPendingDeletes so failures propagate to the overall sync result.
                 continue
@@ -473,6 +505,12 @@ final class SyncEngine {
                     if localNote.syncStatus == .synced && !colorLedger.isDirty(localNote.id) && localNote.noteColor != noteColor {
                         localNote.noteColor = noteColor
                     }
+                    if localNote.syncStatus == .synced {
+                        let localID = localNote.id
+                        postSaveLedgerOps.append { [syncedContentLedger] in
+                            syncedContentLedger.record(noteID: localID, normalizedText: normalizedRemote)
+                        }
+                    }
                     continue
                 }
 
@@ -487,6 +525,49 @@ final class SyncEngine {
                 }
                 // Cloud has changes
                 if localNote.syncStatus == .pendingUpload || localNote.syncStatus == .error {
+                    let normalizedLocal = NoteConverter.normalizedPlainTextForComparison(localNote.plainTextContent)
+                    let textsMatch = (normalizedRemote == normalizedLocal)
+                    let remoteMatchesLastSynced = syncedContentLedger.matches(noteID: localNote.id, normalizedText: normalizedRemote)
+                    let localID = localNote.id
+
+                    if textsMatch {
+                        // Cloud and local have equivalent canonical text: update changeKey without creating a duplicate conflict copy.
+                        localNote.changeKey = changeKey
+                        postSaveLedgerOps.append { [syncedContentLedger] in
+                            syncedContentLedger.record(noteID: localID, normalizedText: normalizedRemote)
+                        }
+                        let isCloudNewer = remoteModifiedDate.map { $0 > localNote.modifiedAt } ?? false
+                        let hasDirtyColor = colorLedger.isDirty(localID)
+                        let localRichDiffers = NoteConverter.hasDistinctRichTextFormatting(
+                            localAttributedData: localNote.attributedContentData,
+                            remoteHTML: htmlContent
+                        )
+                        if !hasDirtyColor, let webNoteJSON {
+                            localNote.webNoteJSON = webNoteJSON
+                        }
+                        if isCloudNewer && !hasDirtyColor && !localRichDiffers {
+                            localNote.plainTextContent = plainText
+                            let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
+                            localNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
+                            localNote.noteColor = noteColor
+                            localNote.modifiedAt = StickyNote.resolvedModifiedAt(local: localNote.modifiedAt, remote: remoteModifiedDate)
+                            if let remoteCreatedDate { localNote.createdAt = remoteCreatedDate }
+                            localNote.syncStatus = .synced
+                            localNote.lastSyncedAt = Date()
+                        } else if isCloudNewer && !hasDirtyColor {
+                            localNote.noteColor = noteColor
+                        }
+                        continue
+                    } else if remoteMatchesLastSynced {
+                        // Remote still holds the last synced base revision (metadata/changeKey bump only);
+                        // let the push phase overwrite it with the local edits without cloning the base revision.
+                        localNote.changeKey = changeKey
+                        if !colorLedger.isDirty(localID), let webNoteJSON {
+                            localNote.webNoteJSON = webNoteJSON
+                        }
+                        continue
+                    }
+
                     // Conflict Resolution:
                     // If cloud is newer, preserve cloud as primary and save local as copy
                     if let remoteModifiedDate, remoteModifiedDate > localNote.modifiedAt {
@@ -506,10 +587,10 @@ final class SyncEngine {
                         // 否则只搬运缓存的云端 `_Note`（没有就不写）。主便笺随后取云端颜色，因此它自己的 dirty 标记不再适用。
                         let wasDirty = colorLedger.isDirty(localNote.id)
                         let copyID = copyNote.id
-                        let localID = localNote.id
-                        postSaveLedgerOps.append { [colorLedger] in
+                        postSaveLedgerOps.append { [colorLedger, syncedContentLedger] in
                             if wasDirty { colorLedger.markDirty(copyID) } else { colorLedger.markCarry(copyID) }
                             colorLedger.clearDirty(localID)
+                            syncedContentLedger.record(noteID: localID, normalizedText: normalizedRemote)
                         }
                         ColorDiagnostics.guardDecision(path: "conflict-copy", remoteID: remoteId, dirty: wasDirty,
                                                        policy: wasDirty ? "writeLocal" : "carryCached")
@@ -527,30 +608,34 @@ final class SyncEngine {
                         localNote.lastSyncedAt = Date()
                     } else {
                         // Local is newer: preserve diverging cloud edits as a conflict copy before local upload overwrites remote.
-                        if plainText != localNote.plainTextContent {
-                            let cloudCopy = StickyNote(
-                                color: noteColor,
-                                content: plainText,
-                                ownerAccountID: scope.accountID,
-                                syncStatus: .pendingUpload
-                            )
-                            let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
-                            cloudCopy.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
-                            cloudCopy.webNoteJSON = webNoteJSON
-                            cloudCopy.createdAt = remoteCreatedDate ?? Date()
-                            cloudCopy.modifiedAt = remoteModifiedDate ?? Date()
-                            modelContext.insert(cloudCopy)
-                            let cloudCopyID = cloudCopy.id
-                            postSaveLedgerOps.append { [colorLedger] in colorLedger.markCarry(cloudCopyID) }
-                            ColorDiagnostics.guardDecision(path: "conflict-copy", remoteID: remoteId, dirty: false, policy: "carryCached", detail: "local-newer")
-                            localNote.changeKey = changeKey
+                        let cloudCopy = StickyNote(
+                            color: noteColor,
+                            content: plainText,
+                            ownerAccountID: scope.accountID,
+                            syncStatus: .pendingUpload
+                        )
+                        let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
+                        cloudCopy.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
+                        cloudCopy.webNoteJSON = webNoteJSON
+                        cloudCopy.createdAt = remoteCreatedDate ?? Date()
+                        cloudCopy.modifiedAt = remoteModifiedDate ?? Date()
+                        modelContext.insert(cloudCopy)
+                        let cloudCopyID = cloudCopy.id
+                        postSaveLedgerOps.append { [colorLedger, syncedContentLedger] in
+                            colorLedger.markCarry(cloudCopyID)
+                            syncedContentLedger.record(noteID: localID, normalizedText: normalizedRemote)
                         }
+                        ColorDiagnostics.guardDecision(path: "conflict-copy", remoteID: remoteId, dirty: false, policy: "carryCached", detail: "local-newer")
+                        localNote.changeKey = changeKey
                         continue
                     }
                 } else {
                     // 本地无未提交改动，用云端覆盖（云端颜色胜出；保存成功后清除本地 dirty）
                     let localID = localNote.id
-                    postSaveLedgerOps.append { [colorLedger] in colorLedger.clearDirty(localID) }
+                    postSaveLedgerOps.append { [colorLedger, syncedContentLedger] in
+                        colorLedger.clearDirty(localID)
+                        syncedContentLedger.record(noteID: localID, normalizedText: normalizedRemote)
+                    }
                     localNote.plainTextContent = plainText
                     let attrStr = NoteConverter.htmlToAttributedString(htmlContent)
                     localNote.attributedContentData = try? NSKeyedArchiver.archivedData(withRootObject: attrStr, requiringSecureCoding: true)
@@ -581,7 +666,11 @@ final class SyncEngine {
                 newNote.ownerAccountID = scope.accountID
                 newNote.webNoteJSON = webNoteJSON
                 modelContext.insert(newNote)
-                if hasInFlightCreate {
+                let newID = newNote.id
+                postSaveLedgerOps.append { [syncedContentLedger] in
+                    syncedContentLedger.record(noteID: newID, normalizedText: normalizedRemote)
+                }
+                if hasInFlightUpload {
                     recentlyPulledWhileCreating.insert(newNote.id)
                 }
             }
@@ -602,9 +691,10 @@ final class SyncEngine {
             debounceTasks.removeValue(forKey: localNote.id)
             debounceTokens.removeValue(forKey: localNote.id)
             let deletedID = localNote.id
-            postSaveLedgerOps.append { [colorLedger] in
+            postSaveLedgerOps.append { [colorLedger, syncedContentLedger] in
                 colorLedger.clearDirty(deletedID)
                 colorLedger.clearCarry(deletedID)
+                syncedContentLedger.clear(deletedID)
             }
             if !localNote.audioRecordings.isEmpty {
                 // Audio recordings are local-only; detach from cloud instead of destroying user voice memos.
@@ -621,6 +711,10 @@ final class SyncEngine {
         try validate(scope)
         try modelContext.save()
         for op in postSaveLedgerOps { op() }
+        if let deletedTicks = recentlyDeletedRemoteTicks[scope.accountID] {
+            let remaining = deletedTicks.filter { $0.value > pullStartTick }
+            recentlyDeletedRemoteTicks[scope.accountID] = remaining.isEmpty ? nil : remaining
+        }
         skippedCloudCreateCount = skippedCloudCreates
         return activeToken
     }
@@ -1009,8 +1103,8 @@ final class SyncEngine {
                     NSLocalizedDescriptionKey: "Update response missing body; refusing to mark synced"
                 ])
             }
-            let expected = NoteConverter.extractPlainText(from: uploadedHTML)
-            let actual = NoteConverter.extractPlainText(from: content)
+            let expected = NoteConverter.normalizedPlainTextForComparison(NoteConverter.extractPlainText(from: uploadedHTML))
+            let actual = NoteConverter.normalizedPlainTextForComparison(NoteConverter.extractPlainText(from: content))
             if expected != actual {
                 note.syncStatus = .error
                 throw NSError(domain: "SyncEngine", code: -3, userInfo: [
@@ -1049,9 +1143,10 @@ final class SyncEngine {
         note.lastSyncedAt = Date()
         noteLastUploadedTick[note.id] = nextSyncTick()
         try saveDurably(note)
-        // Only mutate color ledger AFTER SwiftData persistence succeeds so ledger and store stay consistent.
+        // Only mutate ledgers AFTER SwiftData persistence succeeds so ledger and store stay consistent.
         if shouldClearDirty { colorLedger.clearDirty(note.id) }
         colorLedger.clearCarry(note.id)
+        syncedContentLedger.record(noteID: note.id, plainText: snapshot.text)
     }
 
     // MARK: - 网页原色保护
@@ -1233,7 +1328,8 @@ final class SyncEngine {
             )
             guard let note = try? modelContext.fetch(descriptor).first,
                   note.ownerAccountID == scope.accountID, !note.isDeletedLocally, !note.recoveryPaused,
-                  !isUntouchedBlankNewNote(note) else { return }
+                  !isUntouchedBlankNewNote(note),
+                  note.syncStatus != .synced || !note.pendingCleanupRemoteIDs.isEmpty || uploadingNoteIDs.contains(note.id) else { return }
 
             do {
                 try validate(scope)
@@ -1302,13 +1398,18 @@ final class SyncEngine {
                 try? modelContext.save()
             }
         } else {
+            var didDeleteLocally = false
             if note.hasRecoveryHistory {
                 note.recoveryPaused = true
                 note.syncStatus = .synced
             } else {
                 modelContext.delete(note)
+                didDeleteLocally = true
             }
             try? modelContext.save()
+            if didDeleteLocally {
+                syncedContentLedger.clear(noteID)
+            }
         }
     }
 
@@ -1332,6 +1433,7 @@ final class SyncEngine {
                 if let note = try? modelContext.fetch(descriptor).first, !note.isDeleted, note.isDeletedLocally {
                     if note.remoteId == remoteId { note.remoteId = nil }
                     note.pendingCleanupRemoteIDs.removeAll { $0 == remoteId }
+                    var didDeleteLocally = false
                     if note.remoteId == nil && note.pendingCreateOperationID == nil &&
                         note.pendingCleanupRemoteIDs.isEmpty && !note.hasUnresolvedRecoveryState {
                         if note.hasRecoveryHistory {
@@ -1339,9 +1441,13 @@ final class SyncEngine {
                             note.syncStatus = .synced
                         } else {
                             modelContext.delete(note)
+                            didDeleteLocally = true
                         }
                     }
                     try? modelContext.save()
+                    if didDeleteLocally {
+                        syncedContentLedger.clear(noteID)
+                    }
                 }
             } catch is CancellationError {
                 return
@@ -1445,6 +1551,7 @@ final class SyncEngine {
                 }
             }
         }
+        var purgedIDs: [UUID] = []
         for note in localNotes where !note.isDeleted && note.isDeletedLocally &&
             note.remoteId == nil && note.pendingCreateOperationID == nil &&
             note.pendingCleanupRemoteIDs.isEmpty && !note.hasUnresolvedRecoveryState {
@@ -1453,10 +1560,12 @@ final class SyncEngine {
                 note.recoveryPaused = true
                 note.syncStatus = .synced
             } else {
+                purgedIDs.append(note.id)
                 modelContext.delete(note)
             }
         }
         try modelContext.save()
+        for id in purgedIDs { syncedContentLedger.clear(id) }
         // Per-record errors are retained, but MUST NOT starve unrelated safe uploads.
         return failures + unresolved
     }
@@ -1481,6 +1590,7 @@ final class SyncEngine {
 
         if httpResponse.statusCode == 404 {
             pendingRemoteDeletes[scope.accountID]?.remove(remoteId)
+            recordRecentlyDeleted(remoteId: remoteId, accountID: scope.accountID)
             return
         }
 
@@ -1492,6 +1602,7 @@ final class SyncEngine {
         }
 
         pendingRemoteDeletes[scope.accountID]?.remove(remoteId)
+        recordRecentlyDeleted(remoteId: remoteId, accountID: scope.accountID)
     }
 
     // MARK: - Explicit, account-verified recovery (never invoked by timers or normal sync)
@@ -1761,6 +1872,7 @@ final class SyncEngine {
             guard let status = (response as? HTTPURLResponse)?.statusCode, (200...299).contains(status) || status == 404 else {
                 throw syncError(-47, "删除结果未确认：保留精确 ID 和授权记录，不会自动重发；请重新核对。")
             }
+            recordRecentlyDeleted(remoteId: fresh.id, accountID: scope.accountID)
         }
         try checkRecovery(note, scope: scope)
         guard note.recoveryVersion == actionVersion, note.isDeletedLocally == candidate.wasDeleted else {
@@ -1895,6 +2007,94 @@ final class SyncEngine {
         let year2100 = Date(timeIntervalSince1970: 4_102_444_800)
         guard date >= year2000, date <= year2100 else { return nil }
         return date
+    }
+}
+
+/// Records salted SHA-256 digests of each note's last synced canonical plain text in UserDefaults
+/// (bounded LRU, zero plaintext stored, zero SwiftData schema impact) so metadata-only server
+/// `changeKey`/timestamp bumps never manufacture spurious duplicate conflict copies.
+final class SyncedContentLedger: @unchecked Sendable {
+    static let capacity = 2000
+    private static let digestsKey = "SyncedContentLedger.digests.v1"
+    private static let orderKey = "SyncedContentLedger.order.v1"
+    private let defaults: UserDefaults
+    private let lock = NSLock()
+    private var digests: [String: String]
+    private var order: [String]
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let rawDigests = (defaults.dictionary(forKey: Self.digestsKey) as? [String: String]) ?? [:]
+        let rawOrder = (defaults.stringArray(forKey: Self.orderKey) ?? []).filter { rawDigests[$0] != nil }
+        var seen: Set<String> = []
+        var uniqueOrder: [String] = []
+        for key in rawOrder where seen.insert(key).inserted {
+            uniqueOrder.append(key)
+        }
+        for key in rawDigests.keys.sorted() where seen.insert(key).inserted {
+            uniqueOrder.append(key)
+        }
+        if uniqueOrder.count > Self.capacity {
+            let overflow = uniqueOrder.count - Self.capacity
+            for evicted in uniqueOrder.prefix(overflow) {
+                seen.remove(evicted)
+            }
+            uniqueOrder.removeFirst(overflow)
+        }
+        self.order = uniqueOrder
+        self.digests = rawDigests.filter { seen.contains($0.key) }
+    }
+
+    private static func digest(noteID: UUID, normalizedText: String) -> String {
+        let payload = "\(noteID.uuidString)\0\(normalizedText)"
+        let hash = SHA256.hash(data: Data(payload.utf8))
+        return hash.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func persistLocked() {
+        defaults.set(digests, forKey: Self.digestsKey)
+        defaults.set(order, forKey: Self.orderKey)
+    }
+
+    func record(noteID: UUID, plainText: String) {
+        record(noteID: noteID, normalizedText: NoteConverter.normalizedPlainTextForComparison(plainText))
+    }
+
+    func record(noteID: UUID, normalizedText: String) {
+        let key = noteID.uuidString
+        let hash = Self.digest(noteID: noteID, normalizedText: normalizedText)
+        lock.lock()
+        defer { lock.unlock() }
+        digests[key] = hash
+        order.removeAll { $0 == key }
+        order.append(key)
+        if order.count > Self.capacity {
+            let overflow = order.count - Self.capacity
+            for evicted in order.prefix(overflow) {
+                digests.removeValue(forKey: evicted)
+            }
+            order.removeFirst(overflow)
+        }
+        persistLocked()
+    }
+
+    func matches(noteID: UUID, normalizedText: String) -> Bool {
+        let key = noteID.uuidString
+        let expected = Self.digest(noteID: noteID, normalizedText: normalizedText)
+        lock.lock()
+        defer { lock.unlock() }
+        guard let stored = digests[key] else { return false }
+        return stored == expected
+    }
+
+    func clear(_ noteID: UUID) {
+        let key = noteID.uuidString
+        lock.lock()
+        defer { lock.unlock() }
+        if digests.removeValue(forKey: key) != nil {
+            order.removeAll { $0 == key }
+            persistLocked()
+        }
     }
 }
 

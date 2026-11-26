@@ -120,6 +120,91 @@ struct NoteConverter {
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Normalizes plain text so benign server whitespace/newline round-trip differences
+    /// do not trigger spurious conflict copies or false PATCH verification failures.
+    static func normalizedPlainTextForComparison(_ text: String) -> String {
+        let stripped = text
+            .replacingOccurrences(of: "\u{FFFC}", with: "")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = stripped.components(separatedBy: "\n").map { line in
+            line.split(whereSeparator: { $0 == " " || $0 == "\t" }).joined(separator: " ")
+        }
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Returns true only if archived local rich-text formatting/attachments genuinely diverge
+    /// from the remote HTML when canonicalized past outer `<div>`, `&nbsp;`, and trailing breaks.
+    static func hasDistinctRichTextFormatting(localAttributedData: Data?, remoteHTML: String) -> Bool {
+        guard let localAttributedData,
+              let localAttr = try? NSKeyedUnarchiver.unarchivedObject(
+                  ofClasses: [NSAttributedString.self, NSFont.self, NSColor.self,
+                              NSParagraphStyle.self, NSShadow.self, NSTextAttachment.self],
+                  from: localAttributedData
+              ) as? NSAttributedString else {
+            return false
+        }
+        let localCanonical = canonicalHTMLFragment(attributedStringToHtml(localAttr))
+        let remoteCanonical = canonicalHTMLFragment(attributedStringToHtml(htmlToAttributedString(remoteHTML)))
+        return localCanonical != remoteCanonical
+    }
+
+    private static func canonicalHTMLFragment(_ html: String) -> String {
+        var fragment = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = fragment.lowercased()
+        if lower.hasPrefix("<div>") && lower.hasSuffix("</div>") && fragment.count >= 11 {
+            fragment = String(fragment.dropFirst(5).dropLast(6))
+        }
+        fragment = fragment
+            .replacingOccurrences(of: "&nbsp;", with: " ", options: .caseInsensitive)
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        // Collapse runs of spaces/tabs/newlines into a single ASCII space.
+        var collapsed = ""
+        collapsed.reserveCapacity(fragment.count)
+        var inSpaceRun = false
+        for ch in fragment {
+            if ch == " " || ch == "\t" || ch == "\n" {
+                if !inSpaceRun {
+                    collapsed.append(" ")
+                    inSpaceRun = true
+                }
+            } else {
+                collapsed.append(ch)
+                inSpaceRun = false
+            }
+        }
+        fragment = collapsed
+
+        // Repeatedly trim outer whitespace and leading/trailing <br> / <br/> / <br /> tokens.
+        let breakTokens = ["<br/>", "<br />", "<br>"]
+        var changed = true
+        while changed {
+            changed = false
+            let trimmed = fragment.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed != fragment {
+                fragment = trimmed
+                changed = true
+            }
+            let currentLower = fragment.lowercased()
+            for token in breakTokens where currentLower.hasPrefix(token) {
+                fragment = String(fragment.dropFirst(token.count))
+                changed = true
+                break
+            }
+            let afterPrefixLower = fragment.lowercased()
+            for token in breakTokens where afterPrefixLower.hasSuffix(token) {
+                fragment = String(fragment.dropLast(token.count))
+                changed = true
+                break
+            }
+        }
+        return fragment
+    }
+
     // MARK: - Color Mapping for official Microsoft Sticky Notes
     //
     // Two independent encodings are written on every upload:

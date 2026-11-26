@@ -409,4 +409,245 @@ final class SyncLifecycleTests: XCTestCase {
         XCTAssertEqual(local.pendingCleanupIDsData, rawSync, "损坏同步日志不得被 setter 静默覆盖")
         XCTAssertEqual(local.recoveryAuditData, rawAudit, "损坏恢复日志不得被 setter 静默覆盖")
     }
+
+    // MARK: Duplicate-Upload & Spurious-Conflict Regression Tests
+
+    func testCloudNewerSameTextDoesNotCreateDuplicateUpload() async throws {
+        let local = note("hello world \n", remote: "R-SAME")
+        local.syncStatus = .error
+        local.modifiedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        local.noteColor = .blue
+        local.attributedContentData = try NSKeyedArchiver.archivedData(
+            withRootObject: NSAttributedString(string: "hello world \n"),
+            requiringSecureCoding: true
+        )
+        local.audioRecordings = [Data([1, 2, 3])]
+        MockURLProtocol.handler = { req in
+            if req.httpMethod == "GET" {
+                return .http(status: 200, json: ["value": [[
+                    "id": "R-SAME",
+                    "changeKey": "ck-newer",
+                    "body": ["content": "<div>hello&nbsp;world</div>"],
+                    "lastModifiedDateTime": "2030-01-01T00:00:00Z"
+                ]]])
+            }
+            return .http(status: 500, json: [:])
+        }
+
+        await engine.syncAll(modelContext: context)
+
+        let notes = try context.fetch(FetchDescriptor<StickyNote>())
+        XCTAssertEqual(MockURLProtocol.requests.filter { $0.method == "POST" }.count, 0, "等效文本的云端新版本不得制造重复副本并二次上传")
+        XCTAssertEqual(notes.count, 1)
+        XCTAssertEqual(local.syncStatus, .synced)
+        XCTAssertEqual(local.changeKey, "ck-newer")
+        XCTAssertEqual(local.audioRecordings, [Data([1, 2, 3])], "收敛时必须保留本地录音")
+        XCTAssertEqual(engine.state, .idle)
+    }
+
+    func testLocalNewerWhitespaceDifferenceDoesNotCreateDuplicateCloudCopy() async throws {
+        let local = note("line 1  \n  line 2\n", remote: "R-WS")
+        local.modifiedAt = Date(timeIntervalSince1970: 1_900_000_000)
+        MockURLProtocol.handler = { req in
+            switch req.httpMethod {
+            case "GET":
+                return .http(status: 200, json: ["value": [[
+                    "id": "R-WS",
+                    "changeKey": "ck-server",
+                    "body": ["content": "<div>line 1<br/>line 2</div>"],
+                    "lastModifiedDateTime": "2025-01-01T00:00:00Z"
+                ]]])
+            case "PATCH":
+                return .http(status: 200, json: [
+                    "id": "R-WS",
+                    "changeKey": "ck-patched",
+                    "body": ["content": "<div>line 1  <br/>  line 2<br/></div>"]
+                ])
+            default:
+                return .http(status: 500, json: [:])
+            }
+        }
+
+        await engine.syncAll(modelContext: context)
+
+        XCTAssertEqual(MockURLProtocol.requests.filter { $0.method == "POST" }.count, 0, "首尾空白或换行差异不得产生重复 cloudCopy")
+        XCTAssertEqual(MockURLProtocol.requests.filter { $0.method == "PATCH" }.count, 1)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StickyNote>()), 1)
+        XCTAssertEqual(local.syncStatus, .synced)
+        XCTAssertEqual(local.changeKey, "ck-patched")
+        XCTAssertEqual(engine.state, .idle)
+    }
+
+    func testSubstrateChangeKeyBumpAfterSyncDoesNotDuplicateOnSubsequentLocalEdit() async throws {
+        let local = note("v1")
+        MockURLProtocol.handler = { _ in
+            .http(status: 201, json: ["id": "R-1", "changeKey": "ck1", "body": ["content": "<div>v1</div>"]])
+        }
+        try await engine.uploadNote(local, token: "fake")
+        XCTAssertEqual(local.remoteId, "R-1")
+        XCTAssertEqual(local.syncStatus, .synced)
+
+        // Local edits to v2; meanwhile server bumps changeKey & timestamp without changing v1 body.
+        local.plainTextContent = "v2"
+        local.modifiedAt = Date(timeIntervalSince1970: 1_750_000_000)
+        local.syncStatus = .pendingUpload
+        MockURLProtocol.reset()
+        MockURLProtocol.handler = { req in
+            switch req.httpMethod {
+            case "GET":
+                return .http(status: 200, json: ["value": [[
+                    "id": "R-1",
+                    "changeKey": "ck-bumped",
+                    "body": ["content": "<div>v1</div>"],
+                    "lastModifiedDateTime": "2030-01-01T00:00:00Z"
+                ]]])
+            case "PATCH":
+                return .http(status: 200, json: ["id": "R-1", "changeKey": "ck2", "body": ["content": "<div>v2</div>"]])
+            default:
+                return .http(status: 500, json: [:])
+            }
+        }
+
+        await engine.syncAll(modelContext: context)
+
+        XCTAssertEqual(MockURLProtocol.requests.filter { $0.method == "POST" }.count, 0, "云端仍为上次已同步基线正文 v1，仅 changeKey 变化时不得复制上传")
+        XCTAssertEqual(MockURLProtocol.requests.filter { $0.method == "PATCH" }.count, 1)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StickyNote>()), 1)
+        XCTAssertEqual(local.plainTextContent, "v2")
+        XCTAssertEqual(local.syncStatus, .synced)
+        XCTAssertEqual(local.changeKey, "ck2")
+
+        // Phase 2: genuine concurrent 3-way divergence (base was v2, local has v3-local, cloud has v3-cloud) must still preserve both.
+        local.plainTextContent = "v3-local"
+        local.modifiedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        local.syncStatus = .pendingUpload
+        MockURLProtocol.reset()
+        MockURLProtocol.handler = { req in
+            if req.httpMethod == "GET" {
+                return .http(status: 200, json: ["value": [[
+                    "id": "R-1",
+                    "changeKey": "ck3",
+                    "body": ["content": "<div>v3-cloud</div>"],
+                    "lastModifiedDateTime": "2031-01-01T00:00:00Z"
+                ]]])
+            }
+            return .http(status: 201, json: ["id": "R-COPY", "changeKey": "ck-copy"])
+        }
+
+        await engine.syncAll(modelContext: context)
+
+        let notes = try context.fetch(FetchDescriptor<StickyNote>())
+        XCTAssertEqual(notes.count, 2, "真正的双向并发分歧编辑仍必须保留双端副本")
+        XCTAssertTrue(notes.contains { $0.plainTextContent == "v3-local" })
+        XCTAssertTrue(notes.contains { $0.plainTextContent == "v3-cloud" })
+    }
+
+    func testPatchBodyVerificationToleratesExchangeWhitespaceNormalization() async throws {
+        let local = note("a  b\n", remote: "R-NORM")
+        MockURLProtocol.handler = { _ in
+            .http(status: 200, json: [
+                "id": "R-NORM",
+                "changeKey": "ck-2",
+                "body": ["content": "<div>a&nbsp;b</div>"]
+            ])
+        }
+
+        try await engine.uploadNote(local, token: "fake")
+
+        XCTAssertEqual(local.syncStatus, .synced)
+        XCTAssertEqual(local.changeKey, "ck-2")
+    }
+
+    func testConcurrentPullDuringReplaceRemoteNoteDoesNotDuplicateNewObject() async throws {
+        let local = note("edited", remote: "R-OLD")
+        MockURLProtocol.holdMethods = ["POST"]
+        MockURLProtocol.handler = { req in
+            switch req.httpMethod {
+            case "PATCH":
+                return .http(status: 403, json: [:])
+            case "GET" where req.url?.path.contains("mailFolders") == true:
+                return .http(status: 200, json: ["value": [self.remote("R-NEW", "edited")]])
+            case "GET":
+                return .http(status: 200, json: ["id": "R-OLD", "singleValueExtendedProperties": []])
+            case "POST":
+                return .http(status: 201, json: ["id": "R-NEW", "changeKey": "ck-new", "body": ["content": "<div>edited</div>"]])
+            case "DELETE":
+                return .http(status: 204, json: nil)
+            default:
+                return .http(status: 500, json: [:])
+            }
+        }
+
+        let uploadTask = Task { try await self.engine.uploadNote(local, token: "fake", retryAuthOnFailure: false) }
+        try await waitUntil { MockURLProtocol.heldCount == 1 }
+
+        let pullTask = Task { await self.engine.syncAll(modelContext: self.context) }
+        try await waitUntil { self.engine.uploadWaiterCount(for: local.id) == 1 }
+
+        MockURLProtocol.releaseNext()
+        try await uploadTask.value
+        await pullTask.value
+
+        let notes = try context.fetch(FetchDescriptor<StickyNote>())
+        XCTAssertEqual(notes.count, 1, "replaceRemoteNote 在途 POST 期间并发 pull 不得留下重复便笺")
+        XCTAssertEqual(local.remoteId, "R-NEW")
+        XCTAssertEqual(local.syncStatus, .synced)
+    }
+
+    func testConcurrentPullDoesNotResurrectOldObjectDeletedByReplaceRemoteNote() async throws {
+        let local = note("edited", remote: "R-OLD")
+        MockURLProtocol.holdPredicate = { req in
+            req.httpMethod == "GET" && req.url?.path.contains("mailFolders") == true
+        }
+        MockURLProtocol.handler = { req in
+            switch req.httpMethod {
+            case "GET" where req.url?.path.contains("mailFolders") == true:
+                return .http(status: 200, json: ["value": [self.remote("R-OLD", "before-edit")]])
+            case "GET":
+                return .http(status: 200, json: ["id": "R-OLD", "singleValueExtendedProperties": []])
+            case "PATCH":
+                return .http(status: 403, json: [:])
+            case "POST":
+                return .http(status: 201, json: ["id": "R-NEW", "changeKey": "ck-new", "body": ["content": "<div>edited</div>"]])
+            case "DELETE":
+                return .http(status: 204, json: nil)
+            default:
+                return .http(status: 500, json: [:])
+            }
+        }
+
+        let pullTask = Task { await self.engine.syncAll(modelContext: self.context) }
+        try await waitUntil { MockURLProtocol.heldCount == 1 }
+
+        try await engine.uploadNote(local, token: "fake", retryAuthOnFailure: false)
+        XCTAssertEqual(local.remoteId, "R-NEW")
+
+        MockURLProtocol.releaseNext()
+        await pullTask.value
+
+        let notes = try context.fetch(FetchDescriptor<StickyNote>())
+        XCTAssertEqual(notes.count, 1, "旧 GET 快照不得复活已被 replaceRemoteNote 删除的旧对象 R-OLD")
+        XCTAssertEqual(local.remoteId, "R-NEW")
+        XCTAssertEqual(local.syncStatus, .synced)
+        XCTAssertEqual(engine.state, .idle)
+    }
+
+    func testPullDeduplicatesRepeatedRemoteIDAcrossPages() async throws {
+        let page2URL = "https://graph.microsoft.com/v1.0/me/mailFolders/notes/messages?$skiptoken=p2"
+        MockURLProtocol.handler = { req in
+            let urlStr = req.url?.absoluteString ?? ""
+            if urlStr.contains("skiptoken=p2") {
+                return .http(status: 200, json: ["value": [self.remote("R-DUP", "hello")]])
+            }
+            return .http(status: 200, json: [
+                "value": [self.remote("R-DUP", "hello")],
+                "@odata.nextLink": page2URL
+            ])
+        }
+
+        await engine.syncAll(modelContext: context)
+
+        XCTAssertEqual(engine.state, .idle)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<StickyNote>()), 1, "跨页重复出现的同一 remoteId 只能保留一条记录")
+    }
 }
